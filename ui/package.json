@@ -1,0 +1,13 @@
+{
+  "name": "broadcast-linux-ui",
+  "version": "2.3.0",
+  "private": true,
+  "description": "NVIDIA Broadcast for Linux — Electron 2.3.0 Desktop UI",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^35.0.0"
+  }
+}
