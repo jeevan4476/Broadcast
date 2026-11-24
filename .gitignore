@@ -4,6 +4,9 @@ __pycache__/
 *.py[cod]
 ui/node_modules
 node_modules
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 *.exe
 *.crdownload
 *.onnx

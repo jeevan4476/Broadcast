@@ -148,6 +148,8 @@ def run_doctor() -> dict[str, Any]:
         next_steps.append(
             'Load virtual camera: sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="NVIDIA Broadcast Camera" exclusive_caps=1'
         )
+    if not electron_bin:
+        next_steps.append("Install Electron UI dependencies with Bun: cd ui && bun install")
     if not installed_models:
         next_steps.append("Download neural models: nv-broadcast download-models")
 

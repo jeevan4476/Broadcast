@@ -2,9 +2,17 @@
   "name": "broadcast-linux-ui",
   "version": "2.3.0",
   "private": true,
+  "packageManager": "bun@1.4.2",
   "description": "NVIDIA Broadcast for Linux — Electron 2.3.0 Desktop UI",
   "main": "main.js",
+  "engines": {
+    "bun": ">=1.0.0",
+    "npm": "please-use-bun",
+    "yarn": "please-use-bun",
+    "pnpm": "please-use-bun"
+  },
   "scripts": {
+    "preinstall": "case \"${npm_config_user_agent:-}\" in bun/*) ;; *) echo 'Error: This project enforces Bun. Use `bun install` instead of npm/yarn/pnpm.' >&2; exit 1 ;; esac",
     "start": "electron ."
   },
   "devDependencies": {
