@@ -194,6 +194,8 @@ def default_config() -> dict[str, Any]:
             "mirror": False,
             "split_preview": False,
             "split_position": 0.5,
+            "on_demand": True,
+            "idle_timeout_sec": 3.0,
             "v4l2_controls": {},
             "effects": {
                 "background_blur": {"enabled": False, "strength": 0.7, "mode": "quality"},
@@ -277,6 +279,9 @@ class BroadcastConfig:
         cam = self.data["camera"]
         cam["split_preview"] = bool(cam.get("split_preview", False))
         cam["split_position"] = clamp_float(cam.get("split_position", 0.5), 0.05, 0.95, 0.5)
+        on_demand_val = cam.get("on_demand")
+        cam["on_demand"] = True if on_demand_val is None else bool(on_demand_val)
+        cam["idle_timeout_sec"] = clamp_float(cam.get("idle_timeout_sec", 3.0), 0.5, 60.0, 3.0)
 
         for eid, meta in EFFECT_CATALOG.items():
             section = meta["section"]
