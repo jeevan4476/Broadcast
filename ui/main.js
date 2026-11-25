@@ -1,11 +1,12 @@
 "use strict";
 
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, Tray, nativeImage } = require("electron");
 const { spawn } = require("child_process");
 const http = require("http");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
+const { loadUiPrefs, saveUiPrefs, parseCliArgs, createTrayController } = require("./tray");
 
 const NVB_ROOT = path.resolve(__dirname, "..");
 let mainWin = null;
@@ -13,14 +14,22 @@ let backendProc = null;
 let attachedToDaemon = false;
 let backendInfo = { url: "", token: "" };
 let initialTab = "mic";
+let isQuitting = false;
+let trayController = null;
+let uiPrefs = loadUiPrefs();
 
-for (const arg of process.argv) {
-  if (arg.startsWith("--tab=")) {
-    initialTab = arg.slice("--tab=".length);
-  }
+const cliArgs = parseCliArgs(process.argv);
+if (cliArgs.tab) {
+  initialTab = cliArgs.tab;
 }
 if (process.env.NVB_INITIAL_TAB) {
   initialTab = process.env.NVB_INITIAL_TAB;
+}
+const startMinimizedFlag = cliArgs.minimized;
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
 }
 
 function resolvePythonBin() {
@@ -130,7 +139,35 @@ function stopBackend() {
   }
 }
 
-function createWindow() {
+function shouldHideOnClose() {
+  return Boolean(!isQuitting && uiPrefs.minimizeToTray && trayController && trayController.isAvailable());
+}
+
+function showMainWindow() {
+  if (!mainWin || mainWin.isDestroyed()) {
+    createWindow({ show: true });
+    return;
+  }
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show();
+  mainWin.focus();
+  trayController?.rebuildMenu();
+}
+
+function sendSwitchTab(tab) {
+  if (!tab || !mainWin || mainWin.isDestroyed()) return;
+  if (mainWin.webContents.isLoading()) {
+    mainWin.webContents.once("did-finish-load", () => {
+      if (mainWin && !mainWin.isDestroyed()) {
+        mainWin.webContents.send("nvb:switch-tab", tab);
+      }
+    });
+  } else {
+    mainWin.webContents.send("nvb:switch-tab", tab);
+  }
+}
+
+function createWindow({ show = true } = {}) {
   Menu.setApplicationMenu(null);
   mainWin = new BrowserWindow({
     width: 1280,
@@ -139,6 +176,7 @@ function createWindow() {
     minHeight: 640,
     backgroundColor: "#191919",
     frame: false,
+    show: Boolean(show),
     title: "NVIDIA Broadcast",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -149,8 +187,20 @@ function createWindow() {
   });
 
   mainWin.loadFile(path.join(__dirname, "index.html"));
+  mainWin.on("close", (e) => {
+    if (shouldHideOnClose()) {
+      e.preventDefault();
+      mainWin.hide();
+      trayController?.rebuildMenu();
+    }
+  });
+  mainWin.on("show", () => trayController?.rebuildMenu());
+  mainWin.on("hide", () => trayController?.rebuildMenu());
+  mainWin.on("minimize", () => trayController?.rebuildMenu());
+  mainWin.on("restore", () => trayController?.rebuildMenu());
   mainWin.on("closed", () => {
     mainWin = null;
+    trayController?.rebuildMenu();
   });
 }
 
@@ -161,13 +211,28 @@ ipcMain.handle("nvb:get-bootstrap", () => ({
 }));
 
 ipcMain.handle("nvb:window-control", (_ev, action) => {
-  if (!mainWin) return false;
+  if (!mainWin || mainWin.isDestroyed()) return false;
   if (action === "minimize") mainWin.minimize();
   else if (action === "maximize") {
     if (mainWin.isMaximized()) mainWin.unmaximize();
     else mainWin.maximize();
-  } else if (action === "close") mainWin.close();
+  } else if (action === "close") {
+    if (shouldHideOnClose()) {
+      mainWin.hide();
+      trayController?.rebuildMenu();
+    } else {
+      mainWin.close();
+    }
+  }
   return true;
+});
+
+ipcMain.handle("nvb:get-ui-prefs", () => ({ ...uiPrefs }));
+
+ipcMain.handle("nvb:set-ui-prefs", (_ev, patch) => {
+  uiPrefs = saveUiPrefs(patch || {}, { currentPrefs: uiPrefs });
+  trayController?.rebuildMenu();
+  return { ...uiPrefs };
 });
 
 ipcMain.handle("nvb:pick-image", async () => {
@@ -208,27 +273,67 @@ ipcMain.handle("nvb:copy-text", (_ev, text) => {
   return true;
 });
 
-app.whenReady().then(async () => {
-  try {
-    const existing = await tryAttachExistingDaemon();
-    if (existing) {
-      backendInfo = existing;
-      attachedToDaemon = true;
-    } else {
-      await startBackend();
+if (gotSingleInstanceLock) {
+  app.on("second-instance", (_event, argv) => {
+    const parsed = parseCliArgs(argv);
+    if (parsed.tab) {
+      initialTab = parsed.tab;
     }
-    createWindow();
-  } catch (err) {
-    console.error("Failed to start NVIDIA Broadcast backend:", err);
-    app.quit();
-  }
-});
+    showMainWindow();
+    if (parsed.tab) {
+      sendSwitchTab(parsed.tab);
+    }
+  });
 
-app.on("before-quit", () => {
-  stopBackend();
-});
+  app.whenReady().then(async () => {
+    try {
+      const existing = await tryAttachExistingDaemon();
+      if (existing) {
+        backendInfo = existing;
+        attachedToDaemon = true;
+      } else {
+        await startBackend();
+      }
 
-app.on("window-all-closed", () => {
-  stopBackend();
-  app.quit();
-});
+      trayController = createTrayController({
+        Tray,
+        Menu,
+        nativeImage,
+        getWindow: () => mainWin,
+        getBackendInfo: () => backendInfo,
+        getPrefs: () => uiPrefs,
+        updatePrefs: (patch) => {
+          uiPrefs = saveUiPrefs(patch || {}, { currentPrefs: uiPrefs });
+          return uiPrefs;
+        },
+        onQuit: () => {
+          isQuitting = true;
+          app.quit();
+        },
+        pollIntervalMs: 5000,
+      });
+
+      const trayReady = trayController.init();
+      const startHidden = Boolean((startMinimizedFlag || uiPrefs.startMinimized) && trayReady);
+      createWindow({ show: !startHidden });
+      trayController.rebuildMenu();
+    } catch (err) {
+      console.error("Failed to start NVIDIA Broadcast backend:", err);
+      isQuitting = true;
+      app.quit();
+    }
+  });
+
+  app.on("before-quit", () => {
+    isQuitting = true;
+    trayController?.destroy();
+    stopBackend();
+  });
+
+  app.on("window-all-closed", () => {
+    if (isQuitting || !trayController || !trayController.isAvailable()) {
+      stopBackend();
+      app.quit();
+    }
+  });
+}
