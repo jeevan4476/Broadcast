@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import os
 import shutil
 import subprocess
 import threading
@@ -15,6 +16,7 @@ from PIL import Image, ImageDraw
 
 from .config import BroadcastConfig
 from .devices import find_loopback_cameras, list_cameras
+from .loopback_monitor import OnDemandDebounce, list_loopback_consumers
 from .v4l2_ctl import choose_best_pixel_format, set_v4l2_control
 from .video_effects import HAS_CV2, HAS_NUMPY, VideoEffectsPipeline
 
@@ -40,10 +42,22 @@ except ImportError:
 class VideoEngine:
     """Streams physical V4L2 camera -> GPU/Neural VideoEffectsPipeline -> preview + v4l2loopback."""
 
-    def __init__(self, config: BroadcastConfig) -> None:
+    def __init__(
+        self,
+        config: BroadcastConfig,
+        *,
+        pipeline: Any = None,
+        consumer_detector: Callable[[str, set[int]], list[dict[str, Any]]] | None = None,
+        watcher_poll_interval: float = 0.5,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.config = config
-        self.pipeline = VideoEffectsPipeline(
-            segmentation_backend=config.data.get("segmentation_backend", "auto")
+        self.pipeline = (
+            pipeline
+            if pipeline is not None
+            else VideoEffectsPipeline(
+                segmentation_backend=config.data.get("segmentation_backend", "auto")
+            )
         )
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -52,6 +66,19 @@ class VideoEngine:
         self._standby_stop = threading.Event()
         self._standby_active = False
         self._keep_standby = False
+        self._manual_active = False
+        self._on_demand_active = False
+        self._external_consumers: list[dict[str, Any]] = []
+        self._watcher_thread: threading.Thread | None = None
+        self._watcher_stop = threading.Event()
+        self._watcher_poll_interval = max(0.02, float(watcher_poll_interval))
+        self._watched_device: str = ""
+        self._consumer_detector = consumer_detector
+        idle_timeout = float(config.data.get("camera", {}).get("idle_timeout_sec", 3.0))
+        self._debounce = OnDemandDebounce(idle_timeout_sec=idle_timeout, clock=clock)
+        self._state_lock = threading.RLock()
+        self._writer_pid_lock = threading.Lock()
+        self._writer_pids: set[int] = set()
         self._lock = threading.Lock()
         self._latest_frame_np: Any = None
         self._latest_frame_pil: Image.Image | None = None
@@ -67,6 +94,23 @@ class VideoEngine:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def on_demand_active(self) -> bool:
+        return self._on_demand_active
+
+    @property
+    def external_consumers(self) -> list[dict[str, Any]]:
+        with self._state_lock:
+            return [dict(c) for c in self._external_consumers]
+
+    @property
+    def manual_active(self) -> bool:
+        return self._manual_active
+
+    @property
+    def standby_active(self) -> bool:
+        return self._standby_active
 
     @property
     def fps(self) -> float:
@@ -184,38 +228,173 @@ class VideoEngine:
             except Exception:
                 pass
 
+    def _is_on_demand_enabled(self) -> bool:
+        return bool(self.config.data.get("camera", {}).get("on_demand", True))
+
+    def _detect_consumers(self, device_path: str, exclude_pids: set[int]) -> list[dict[str, Any]]:
+        if self._consumer_detector is not None:
+            return self._consumer_detector(device_path, exclude_pids)
+        return list_loopback_consumers(device_path, exclude_pids=exclude_pids)
+
+    def _start_watcher(self, out_dev: str) -> None:
+        with self._state_lock:
+            if not out_dev or not self._is_on_demand_enabled():
+                return
+            self._watched_device = out_dev
+            self._debounce.idle_timeout_sec = float(
+                self.config.data.get("camera", {}).get("idle_timeout_sec", 3.0)
+            )
+            if self._watcher_thread is not None and self._watcher_thread.is_alive():
+                return
+            self._watcher_stop.clear()
+            self._watcher_thread = threading.Thread(
+                target=self._run_watcher_loop,
+                name="nv-broadcast-cam-watcher",
+                daemon=True,
+            )
+            self._watcher_thread.start()
+
+    def _stop_watcher(self) -> None:
+        with self._state_lock:
+            self._watcher_stop.set()
+            thread = self._watcher_thread
+            self._watcher_thread = None
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=2.5)
+
+    def _run_watcher_loop(self) -> None:
+        while not self._watcher_stop.is_set():
+            out_dev = self._watched_device
+            if out_dev:
+                try:
+                    self._poll_consumers_once(out_dev)
+                except Exception:
+                    pass
+            self._watcher_stop.wait(self._watcher_poll_interval)
+
+    def _poll_consumers_once(self, out_dev: str) -> None:
+        with self._writer_pid_lock:
+            excluded = {os.getpid()} | set(self._writer_pids)
+        consumers = self._detect_consumers(out_dev, excluded)
+        with self._state_lock:
+            if self._watcher_stop.is_set() or not self._is_on_demand_enabled():
+                return
+            self._external_consumers = [dict(c) for c in consumers]
+            if consumers:
+                self._debounce.reset()
+                should_wake = not self._running
+                should_sleep = False
+            else:
+                should_wake = False
+                should_sleep = (
+                    self._running
+                    and self._on_demand_active
+                    and not self._manual_active
+                    and self._debounce.update(0)
+                )
+        if should_wake:
+            self.start(preview_only=False, _from_on_demand=True)
+        elif should_sleep:
+            self._release_on_demand_capture()
+
+    def _release_on_demand_capture(self) -> None:
+        with self._state_lock:
+            if not self._running or not self._on_demand_active or self._manual_active:
+                return
+            self._on_demand_active = False
+            self._debounce.reset()
+            self._stop_capture_only()
+            if self._keep_standby:
+                self._start_standby_writer()
+
+    def set_on_demand(self, enabled: bool, idle_timeout_sec: float | None = None) -> None:
+        """Enable or disable on-demand activation at runtime without race conditions."""
+        enabled_bool = bool(enabled)
+        with self._state_lock:
+            cam_cfg = self.config.data.setdefault("camera", {})
+            cam_cfg["on_demand"] = enabled_bool
+            if idle_timeout_sec is not None:
+                timeout_val = max(0.0, float(idle_timeout_sec))
+                cam_cfg["idle_timeout_sec"] = timeout_val
+                self._debounce.idle_timeout_sec = timeout_val
+            if enabled_bool:
+                if self._keep_standby or self._standby_active or self._running:
+                    out_dev = self._watched_device or self._active_output or self.resolve_output_device()
+                    if out_dev:
+                        self._start_watcher(out_dev)
+                return
+
+        self._stop_watcher()
+        with self._state_lock:
+            self._external_consumers = []
+            self._debounce.reset()
+            if self._running and self._on_demand_active and not self._manual_active:
+                self._on_demand_active = False
+                self._stop_capture_only()
+                if self._keep_standby:
+                    self._start_standby_writer()
+
+    def _start_standby_writer(self, out_dev: str | None = None) -> tuple[bool, str]:
+        with self._state_lock:
+            if self._running or self._standby_active:
+                return True, "Virtual camera already active"
+            dev = out_dev or self.resolve_output_device()
+            if not dev:
+                return False, "No v4l2loopback device available for standby"
+            cam_cfg = self.config.data["camera"]
+            width = int(cam_cfg.get("width", 1280))
+            height = int(cam_cfg.get("height", 720))
+            fps = int(cam_cfg.get("fps", 30))
+            self._active_output = dev
+            self._watched_device = dev
+            self._standby_stop.clear()
+            self._standby_active = True
+            self._standby_thread = threading.Thread(
+                target=self._run_standby_loop,
+                args=(dev, width, height, fps),
+                name="nv-broadcast-cam-standby",
+                daemon=True,
+            )
+            self._standby_thread.start()
+            return True, f"Virtual camera standby active on {dev}"
+
+    def _stop_standby_writer(self) -> None:
+        with self._state_lock:
+            self._standby_stop.set()
+            thread = self._standby_thread
+            if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+                thread.join(timeout=2.5)
+            self._standby_thread = None
+            self._standby_active = False
+
     def start_standby(self) -> tuple[bool, str]:
         """Keep v4l2loopback visible to Discord/Meet/Brave (exclusive_caps=1) with webcam LED off."""
-        self._keep_standby = True
-        if self._running or self._standby_active:
-            return True, "Virtual camera already active"
-        out_dev = self.resolve_output_device()
-        if not out_dev:
-            return False, "No v4l2loopback device available for standby"
-        cam_cfg = self.config.data["camera"]
-        width = int(cam_cfg.get("width", 1280))
-        height = int(cam_cfg.get("height", 720))
-        fps = int(cam_cfg.get("fps", 30))
-        self._active_output = out_dev
-        self._standby_stop.clear()
-        self._standby_active = True
-        self._standby_thread = threading.Thread(
-            target=self._run_standby_loop,
-            args=(out_dev, width, height, fps),
-            name="nv-broadcast-cam-standby",
-            daemon=True,
-        )
-        self._standby_thread.start()
-        return True, f"Virtual camera standby active on {out_dev}"
+        with self._state_lock:
+            self._keep_standby = True
+            out_dev = self.resolve_output_device()
+            if not out_dev:
+                return False, "No v4l2loopback device available for standby"
+            self._watched_device = out_dev
+            if self._running or self._standby_active:
+                if self._is_on_demand_enabled():
+                    self._start_watcher(out_dev)
+                return True, "Virtual camera already active"
+            ok, msg = self._start_standby_writer(out_dev)
+            if ok and self._is_on_demand_enabled():
+                self._start_watcher(out_dev)
+            return ok, msg
 
     def stop_standby(self, permanent: bool = False) -> None:
-        if permanent:
-            self._keep_standby = False
-        self._standby_stop.set()
-        if self._standby_thread is not None and self._standby_thread.is_alive():
-            self._standby_thread.join(timeout=2.5)
-        self._standby_thread = None
-        self._standby_active = False
+        stop_watcher = permanent or not self._running
+        if stop_watcher:
+            self._stop_watcher()
+        with self._state_lock:
+            if permanent:
+                self._keep_standby = False
+            self._stop_standby_writer()
+            if stop_watcher:
+                self._external_consumers = []
+                self._debounce.reset()
 
     def _run_standby_loop(self, out_dev: str, width: int, height: int, fps: int) -> None:
         # Build sleek dark NVIDIA Broadcast standby slate once (zero webcam access, zero GPU use)
@@ -238,55 +417,96 @@ class VideoEngine:
                 self._standby_stop.wait(1.0)
         finally:
             self._close_virtual_output(writer)
-            self._standby_active = False
+            if self._standby_thread is threading.current_thread():
+                self._standby_active = False
 
-    def start(self, preview_only: bool = False) -> tuple[bool, str]:
-        if self._running:
-            return True, f"Camera already running ({self._active_input})"
-        # Release standby holder before opening virtual camera for live stream
-        if self._standby_active:
-            self.stop_standby(permanent=False)
-        try:
-            in_dev, pixfmt, width, height, fps = self.resolve_input_device()
-        except RuntimeError as exc:
-            self._last_error = str(exc)
-            return False, str(exc)
+    def start(self, preview_only: bool = False, _from_on_demand: bool = False) -> tuple[bool, str]:
+        with self._state_lock:
+            if _from_on_demand and (not self._is_on_demand_enabled() or self._watcher_stop.is_set()):
+                return False, "On-demand mode is disabled"
+            if self._running:
+                if not _from_on_demand:
+                    self._manual_active = True
+                    self._on_demand_active = False
+                    self._debounce.reset()
+                return True, f"Camera already running ({self._active_input})"
+            try:
+                in_dev, pixfmt, width, height, fps = self.resolve_input_device()
+            except RuntimeError as exc:
+                self._last_error = str(exc)
+                return False, str(exc)
 
-        out_dev = "" if preview_only else self.resolve_output_device()
-        self.apply_saved_v4l2_controls(in_dev)
+            # Release standby holder cleanly before opening virtual camera for live stream
+            if self._standby_active or self._standby_thread is not None:
+                self._stop_standby_writer()
 
-        self._active_input = in_dev
-        self._active_output = out_dev
-        self._active_resolution = f"{width}x{height}@{fps}fps ({pixfmt})"
-        self._last_error = ""
-        self._stop.clear()
-        self.pipeline.reset()
-        self._running = True
+            out_dev = "" if preview_only else self.resolve_output_device()
+            self.apply_saved_v4l2_controls(in_dev)
 
-        self._thread = threading.Thread(
-            target=self._run_loop,
-            args=(in_dev, pixfmt, width, height, fps, out_dev),
-            name="nv-broadcast-video",
-            daemon=True,
-        )
-        self._thread.start()
+            self._active_input = in_dev
+            self._active_output = out_dev
+            if out_dev:
+                self._watched_device = out_dev
+            self._active_resolution = f"{width}x{height}@{fps}fps ({pixfmt})"
+            self._last_error = ""
+            self._manual_active = not _from_on_demand
+            self._on_demand_active = _from_on_demand
+            self._debounce.reset()
+            self._stop.clear()
+            self.pipeline.reset()
+            self._running = True
 
-        out_note = f" -> {out_dev}" if out_dev else " (preview only; install v4l2loopback for virtual camera output)"
-        return True, f"Started camera {in_dev} ({pixfmt} {width}x{height}@{fps}fps){out_note}"
+            self._thread = threading.Thread(
+                target=self._run_loop,
+                args=(in_dev, pixfmt, width, height, fps, out_dev),
+                name="nv-broadcast-video",
+                daemon=True,
+            )
+            self._thread.start()
+
+            if self._keep_standby and self._is_on_demand_enabled() and self._watched_device:
+                self._start_watcher(self._watched_device)
+
+            out_note = f" -> {out_dev}" if out_dev else " (preview only; install v4l2loopback for virtual camera output)"
+            return True, f"Started camera {in_dev} ({pixfmt} {width}x{height}@{fps}fps){out_note}"
+
+    def _stop_capture_only(self) -> None:
+        with self._state_lock:
+            self._stop.set()
+            thread = self._thread
+            if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+                thread.join(timeout=3.0)
+            self._thread = None
+            self._running = False
+            self._fps = 0.0
+
+    def shutdown_all(self) -> None:
+        """Stop watcher, live capture, and standby writer permanently."""
+        self._stop_watcher()
+        with self._state_lock:
+            self._keep_standby = False
+            self._manual_active = False
+            self._on_demand_active = False
+            self._external_consumers = []
+            self._debounce.reset()
+            self._stop_capture_only()
+            self._stop_standby_writer()
+            if hasattr(self.pipeline, "close"):
+                self.pipeline.close()
 
     def stop(self, shutdown: bool = False) -> None:
         if shutdown:
-            self._keep_standby = False
-        self._stop.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=3.0)
-        self._thread = None
-        self._running = False
-        self._fps = 0.0
-        if shutdown:
-            self.stop_standby(permanent=True)
-        elif self._keep_standby:
-            self.start_standby()
+            self.shutdown_all()
+            return
+        with self._state_lock:
+            self._manual_active = False
+            self._on_demand_active = False
+            self._debounce.reset()
+            self._stop_capture_only()
+            if self._keep_standby:
+                ok, _ = self._start_standby_writer()
+                if ok and self._is_on_demand_enabled() and self._watched_device:
+                    self._start_watcher(self._watched_device)
 
     def _run_loop(
         self,
@@ -307,7 +527,10 @@ class VideoEngine:
                 self._last_error = "Neither OpenCV nor ffmpeg is installed for V4L2 capture"
         finally:
             self._close_virtual_output(out_writer)
-            self._running = False
+            if self._thread is threading.current_thread():
+                self._running = False
+                self._on_demand_active = False
+                self._manual_active = False
 
     def _open_virtual_output(self, out_dev: str, width: int, height: int, fps: int) -> Any:
         if HAS_PYVIRTUALCAM and HAS_NUMPY:
@@ -339,6 +562,8 @@ class VideoEngine:
             ]
             try:
                 proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                with self._writer_pid_lock:
+                    self._writer_pids.add(proc.pid)
                 return ("ffmpeg", proc)
             except OSError:
                 return None
@@ -383,6 +608,10 @@ class VideoEngine:
                     handle.wait(timeout=1.5)
         except Exception:
             pass
+        finally:
+            if kind == "ffmpeg":
+                with self._writer_pid_lock:
+                    self._writer_pids.discard(getattr(handle, "pid", -1))
 
     def _publish_np(self, frame_rgb: Any) -> None:
         with self._lock:

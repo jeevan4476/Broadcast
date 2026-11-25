@@ -303,6 +303,13 @@
                     </div>
                   </div>
 
+                  <div class="mini-checks" style="margin-top:8px;">
+                    <label class="mini-check" title="Automatically activate the physical webcam when an app opens the virtual camera, and turn it off when no apps are using it">
+                      <input type="checkbox" id="cam-ondemand-toggle" checked />
+                      <span>Auto-wake webcam on demand</span>
+                    </label>
+                  </div>
+
                   <div class="effects-heading">CAMERA EFFECTS</div>
                   <div class="effects-stack" id="cam-effects-list"></div>
                 </div>
@@ -437,7 +444,40 @@
 
         <!-- ==================== SETTINGS / DOCTOR PAGE ==================== -->
         <section class="page" id="page-settings">
-          <div class="single-page-wrap">
+          <div class="single-page-wrap settings-stack">
+            <div class="studio-card" id="desktop-tray-card">
+              <div class="studio-card-head">
+                <div>
+                  <div class="studio-title">Desktop &amp; System Tray</div>
+                  <div class="studio-sub">Control window close behavior and background startup in the system tray.</div>
+                </div>
+              </div>
+
+              <div class="pref-list">
+                <div class="pref-row">
+                  <div class="pref-meta">
+                    <div class="pref-title">Minimize to tray on close</div>
+                    <div class="pref-desc">Hide the window to the system tray when closing instead of quitting the app.</div>
+                  </div>
+                  <label class="nv-switch" title="Minimize to tray on close">
+                    <input type="checkbox" id="pref-minimize-to-tray" checked />
+                    <span class="nv-switch-track"></span>
+                  </label>
+                </div>
+
+                <div class="pref-row">
+                  <div class="pref-meta">
+                    <div class="pref-title">Start minimized to tray</div>
+                    <div class="pref-desc">Launch NVIDIA Broadcast silently in the system tray on startup.</div>
+                  </div>
+                  <label class="nv-switch" title="Start minimized to tray">
+                    <input type="checkbox" id="pref-start-minimized" />
+                    <span class="nv-switch-track"></span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
             <div class="studio-card">
               <div class="studio-card-head">
                 <div>

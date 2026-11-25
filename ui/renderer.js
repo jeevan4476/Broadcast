@@ -43,6 +43,7 @@
   // ==================== NAVIGATION ====================
   function setActivePage(pageName) {
     const mapped = pageName === "mic" || pageName === "speakers" ? "audio" : pageName;
+    if (!$(`page-${mapped}`)) return;
     document.querySelectorAll(".sidebar-link").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.page === mapped);
     });
@@ -50,6 +51,7 @@
       pg.classList.toggle("active", pg.id === `page-${mapped}`);
     });
     if (mapped === "settings") {
+      loadUiPrefs();
       refreshDoctor();
     }
   }
@@ -534,6 +536,21 @@
   }
 
   // ==================== DOCTOR / SETTINGS ====================
+  async function loadUiPrefs() {
+    const bridge = window.nvb || window.nvBroadcast;
+    if (!bridge || typeof bridge.getUiPrefs !== "function") return;
+    try {
+      const prefs = await bridge.getUiPrefs();
+      if (!prefs) return;
+      const minToggle = $("pref-minimize-to-tray");
+      const startToggle = $("pref-start-minimized");
+      if (minToggle) minToggle.checked = Boolean(prefs.minimizeToTray);
+      if (startToggle) startToggle.checked = Boolean(prefs.startMinimized);
+    } catch (_) {
+      // ignore
+    }
+  }
+
   async function refreshDoctor() {
     const doc = await apiGet("/api/doctor");
     const host = $("doctor-list");
@@ -595,10 +612,21 @@
 
         // Camera state & overlay chips
         const camSub = $("cam-engine-status");
-        camSub.textContent = t.camera.running
-          ? `${t.camera.resolution || "Active"} • ${t.camera.output ? t.camera.output : "Live Preview"}`
-          : "Camera inactive";
+        const consumers = Array.isArray(t.camera.external_consumers) ? t.camera.external_consumers : [];
+        const consumerNames = [...new Set(consumers.map((c) => c.comm || `pid ${c.pid}`))].slice(0, 2).join(", ");
+        if (t.camera.running) {
+          const prefix = t.camera.on_demand_active && consumerNames ? `Auto-active (${consumerNames}) • ` : "";
+          camSub.textContent = `${prefix}${t.camera.resolution || "Active"} • ${t.camera.output ? t.camera.output : "Live Preview"}`;
+        } else if (t.camera.standby_active && t.camera.on_demand) {
+          camSub.textContent = "Standby • Auto-wakes when apps open virtual cam";
+        } else {
+          camSub.textContent = "Camera inactive";
+        }
         camSub.classList.toggle("active", Boolean(t.camera.running));
+        const onDemandToggle = $("cam-ondemand-toggle");
+        if (onDemandToggle && typeof t.camera.on_demand === "boolean") {
+          onDemandToggle.checked = t.camera.on_demand;
+        }
         if (t.camera.running !== Boolean($("camera-stream-img").dataset.live)) {
           syncCameraPreview(Boolean(t.camera.running));
         }
@@ -781,6 +809,12 @@
         apiPost("/api/camera/config", { width: Number(m[1]), height: Number(m[2]), fps: Number(m[3]) });
       }
     });
+    $("cam-ondemand-toggle")?.addEventListener("change", async (e) => {
+      const enabled = Boolean(e.target.checked);
+      const res = await apiPost("/api/camera/config", { on_demand: enabled });
+      if (res && res.config) appState.config = res.config;
+      showToast(enabled ? "On-demand webcam auto-wake enabled" : "On-demand webcam auto-wake disabled");
+    });
 
     $("btn-cam-split").addEventListener("click", async () => {
       const next = !Boolean(appState.config.camera.split_preview);
@@ -838,6 +872,21 @@
     });
 
     // Settings / Doctor page
+    $("pref-minimize-to-tray")?.addEventListener("change", async (e) => {
+      const bridge = window.nvb || window.nvBroadcast;
+      if (!bridge || typeof bridge.setUiPrefs !== "function") return;
+      const saved = await bridge.setUiPrefs({ minimizeToTray: e.target.checked });
+      if (saved) e.target.checked = Boolean(saved.minimizeToTray);
+      showToast(e.target.checked ? "Closing window will minimize to system tray" : "Closing window will quit NVIDIA Broadcast");
+    });
+    $("pref-start-minimized")?.addEventListener("change", async (e) => {
+      const bridge = window.nvb || window.nvBroadcast;
+      if (!bridge || typeof bridge.setUiPrefs !== "function") return;
+      const saved = await bridge.setUiPrefs({ startMinimized: e.target.checked });
+      if (saved) e.target.checked = Boolean(saved.startMinimized);
+      showToast(e.target.checked ? "App will start minimized to system tray" : "App will open window on startup");
+    });
+
     $("btn-doctor-refresh").addEventListener("click", refreshDoctor);
     $("btn-download-models").addEventListener("click", async () => {
       showToast("Verifying neural models...");
@@ -852,6 +901,32 @@
     $("btn-copy-vcam-cmd").addEventListener("click", async () => {
       await window.nvBroadcast.copyText($("vcam-setup-cmd").textContent);
       showToast("Copied Fedora virtual camera command");
+    });
+
+    // Keep tray prefs & effect toggles in sync when returning to the window
+    window.addEventListener("focus", async () => {
+      loadUiPrefs();
+      if (!API_URL || !appState) return;
+      try {
+        const fresh = await apiGet("/api/state");
+        if (!fresh || !fresh.config) return;
+        const prevSig = JSON.stringify([
+          appState.config?.microphone?.effects,
+          appState.config?.speaker?.effects,
+          appState.config?.camera?.effects,
+        ]);
+        const nextSig = JSON.stringify([
+          fresh.config?.microphone?.effects,
+          fresh.config?.speaker?.effects,
+          fresh.config?.camera?.effects,
+        ]);
+        if (prevSig !== nextSig) {
+          appState.config = fresh.config;
+          syncAllEffectCards();
+        }
+      } catch (_) {
+        // ignore focus refresh errors
+      }
     });
 
     setupSplitDrag();
@@ -871,6 +946,15 @@
     populateDevices();
     syncAllEffectCards();
     wireUiHandlers();
+    await loadUiPrefs();
+
+    const bridge = window.nvb || window.nvBroadcast;
+    if (bridge && typeof bridge.onSwitchTab === "function") {
+      bridge.onSwitchTab((tab) => {
+        if (tab) setActivePage(tab);
+      });
+    }
+
     setActivePage(boot.initialTab || "audio");
     connectEvents();
 
