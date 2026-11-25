@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    name: Test and Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python test dependencies and ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          pip install pillow
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Enforce Bun-only lockfiles
+        run: |
+          forbidden="$(find . \
+            \( -path './.git' -o -path '*/node_modules' \) -prune -o \
+            -type f \( -name 'package-lock.json' -o -name 'yarn.lock' -o -name 'pnpm-lock.yaml' \) \
+            -print)"
+          if [[ -n "${forbidden}" ]]; then
+            echo "Forbidden non-Bun lockfiles detected:" >&2
+            echo "${forbidden}" >&2
+            exit 1
+          fi
+
+      - name: Run Python unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Check UI JS syntax and run Bun tests
+        run: |
+          bun -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const transpiler = new Bun.Transpiler({ loader: "js" });
+            const uiDir = "ui";
+            const files = fs.readdirSync(uiDir)
+              .filter((file) => file.endsWith(".js"))
+              .sort()
+              .map((file) => path.join(uiDir, file));
+            if (files.length === 0) {
+              throw new Error("No ui/*.js files found");
+            }
+            for (const file of files) {
+              const source = fs.readFileSync(file, "utf8");
+              transpiler.scan(source);
+              console.log(`Syntax OK: ${file}`);
+            }
+          '
+          shopt -s nullglob
+          bun_tests=(./tests/*.test.js)
+          if (( ${#bun_tests[@]} > 0 )); then
+            bun test "${bun_tests[@]}"
+          else
+            echo "No tests/*.test.js files found; skipping bun test."
+          fi
+
+      - name: Lint shell scripts
+        run: |
+          bash -n nv-broadcast install-deps.sh
+          shellcheck nv-broadcast install-deps.sh

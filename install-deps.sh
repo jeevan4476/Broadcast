@@ -23,11 +23,11 @@ EOF
 
 install_fedora() {
     echo "==> Installing Fedora packages (requires RPM Fusion for v4l2loopback)..."
-    sudo dnf install -y akmod-v4l2loopback v4l2loopback v4l-utils ladspa-noise-suppression-for-voice || {
+    if ! sudo dnf install -y akmod-v4l2loopback v4l2loopback v4l-utils ladspa-noise-suppression-for-voice; then
         echo "Note: If akmod-v4l2loopback was not found, enable RPM Fusion Free first:"
         echo "  sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm"
         return 1
-    }
+    fi
 }
 
 load_cam() {
@@ -60,12 +60,12 @@ if [[ $# -eq 0 ]]; then
 fi
 
 for arg in "$@"; do
-    case "$arg" in
+    case "${arg}" in
         --fedora) install_fedora ;;
         --load-cam) load_cam ;;
         --venv) install_venv ;;
         --all) install_fedora && load_cam && install_venv ;;
         -h|--help) show_help ;;
-        *) echo "Unknown option: $arg"; show_help; exit 1 ;;
+        *) echo "Unknown option: ${arg}"; show_help; exit 1 ;;
     esac
 done
