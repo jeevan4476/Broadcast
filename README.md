@@ -29,10 +29,12 @@ GPU-accelerated Linux recreation of NVIDIA Broadcast 2.3.0 for PipeWire audio, V
 ./install-deps.sh --venv
 ```
 
-### 2. Electron desktop UI dependencies
+### 2. Electron desktop UI dependencies (Bun only)
+
+Install [Bun](https://bun.sh) if not already installed, then install the Electron UI dependencies:
 
 ```bash
-cd ui && npm install && cd ..
+cd ui && bun install && cd ..
 ```
 
 ### 3. Virtual webcam (`v4l2loopback`)
