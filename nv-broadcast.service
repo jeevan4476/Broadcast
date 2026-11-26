@@ -1,0 +1,13 @@
+[Unit]
+Description=NVIDIA Broadcast for Linux (PipeWire Virtual Mic/Speakers + Virtual Camera Standby)
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/nv-broadcast serve --autostart --daemon-file
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

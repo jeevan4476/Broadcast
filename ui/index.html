@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NVIDIA Broadcast</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Custom Broadcast 2.3.0 Titlebar -->
+    <header class="titlebar">
+      <div class="titlebar-brand">
+        <svg class="nv-logo" viewBox="0 0 28 20" width="26" height="18" aria-hidden="true">
+          <path fill="#76b900" d="M10.8 5.9V4.1c.2 0 .4-.03.6-.03 5.5-.17 9.1 4.7 9.1 4.7s-3.9 5.4-8.1 5.4c-.6 0-1.1-.1-1.6-.27v-5.5c2.1.26 2.5 1.2 3.8 3.3l2.8-2.3s-2-2.7-5.5-2.7c-.4 0-.75.04-1.1.1v-0.8zM10.8 0v2.7c.2-.02.4-.03.6-.03 7.6-.25 12.6 6.2 12.6 6.2s-5.7 6.9-11.6 6.9c-.55 0-1.08-.06-1.6-.16v1.68c.44.06.9.1 1.38.1 5.5 0 9.5-2.8 13.3-6.1.63.5 3.2 1.7 3.75 2.25-3.6 3-12 5.45-16.8 5.45-.5 0-.96-.03-1.4-.08V20H28V0H10.8zM10.8 13.9v1.7c-4.5-.8-5.75-5.45-5.75-5.45s2.15-2.4 5.75-2.78v1.87h-.01c-1.88-.22-3.36 1.53-3.36 1.53s.83 2.97 3.37 3.13zM2.9 9.75s2.65-3.92 7.9-4.32V4.02C5 4.48 0 9.4 0 9.4s2.84 8.2 10.8 8.95v-1.5C4.95 16.1 2.9 9.75 2.9 9.75z"/>
+        </svg>
+        <span class="brand-name">NVIDIA BROADCAST</span>
+        <span class="brand-tag">LINUX 2.3</span>
+      </div>
+
+      <div class="titlebar-right">
+        <div class="gpu-pill" id="gpu-pill" title="Live NVIDIA GPU utilization">
+          <span class="gpu-dot"></span>
+          <span id="gpu-pill-text">Detecting RTX GPU...</span>
+        </div>
+        <div class="win-controls">
+          <button class="win-btn" id="btn-min" title="Minimize">
+            <svg viewBox="0 0 12 12" width="11" height="11"><rect x="1" y="6" width="10" height="1.2" fill="currentColor"/></svg>
+          </button>
+          <button class="win-btn" id="btn-max" title="Maximize">
+            <svg viewBox="0 0 12 12" width="11" height="11"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+          </button>
+          <button class="win-btn win-btn-close" id="btn-close" title="Close">
+            <svg viewBox="0 0 12 12" width="11" height="11"><path d="M2 2L10 10M10 2L2 10" stroke="currentColor" stroke-width="1.3"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <!-- 62px Left Icon Navigation Rail (matches Broadcast 2.3.0 .sidebar-nav) -->
+      <nav class="sidebar-nav">
+        <div class="sidebar-top">
+          <button class="sidebar-link active" data-page="audio" title="Audio (Microphone & Speakers)">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="9" y="2" width="6" height="11" rx="3"/>
+              <path d="M5 10a7 7 0 0 0 14 0"/>
+              <line x1="12" y1="17" x2="12" y2="21"/>
+              <line x1="8" y1="21" x2="16" y2="21"/>
+            </svg>
+            <span class="sidebar-page-name">Audio</span>
+          </button>
+
+          <button class="sidebar-link" data-page="camera" title="Camera">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="2" y="6" width="14" height="12" rx="2"/>
+              <path d="M16 10l6-3v10l-6-3z"/>
+            </svg>
+            <span class="sidebar-page-name">Camera</span>
+          </button>
+
+          <button class="sidebar-link" data-page="files" title="Process Audio & Video Files">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <polygon points="10 12 15 15 10 18 10 12" fill="currentColor" stroke="none"/>
+            </svg>
+            <span class="sidebar-page-name">Files</span>
+          </button>
+        </div>
+
+        <div class="sidebar-bottom">
+          <button class="sidebar-link" data-page="settings" title="Settings & System Doctor">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+            <span class="sidebar-page-name">Settings</span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Main Page Container -->
+      <main class="page-host">
+        <!-- ==================== AUDIO PAGE ==================== -->
+        <section class="page active" id="page-audio">
+          <div class="horizontal-split">
+            <!-- Left Column: Microphone & Speakers Controls -->
+            <div class="controls-column">
+              <!-- Microphone Card -->
+              <div class="device-card">
+                <div class="device-header">
+                  <div class="device-header-left">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#76b900" stroke-width="2">
+                      <rect x="9" y="2" width="6" height="11" rx="3"/>
+                      <path d="M5 10a7 7 0 0 0 14 0"/>
+                      <line x1="12" y1="17" x2="12" y2="21"/>
+                    </svg>
+                    <div>
+                      <div class="device-title">Microphone</div>
+                      <div class="device-sub" id="mic-engine-status">Virtual mic inactive</div>
+                    </div>
+                  </div>
+                  <label class="nv-switch" title="Start or stop Virtual Microphone">
+                    <input type="checkbox" id="mic-master-toggle" />
+                    <span class="nv-switch-track"></span>
+                  </label>
+                </div>
+
+                <div class="device-body">
+                  <div class="field-row">
+                    <div class="field-head-row">
+                      <label class="field-label">Microphone source</label>
+                      <div class="field-actions">
+                        <button class="chip-btn" id="btn-mic-default" title="Route all Linux apps through NVIDIA Broadcast (Microphone) automatically">Use as Default Mic</button>
+                        <button class="chip-btn" id="btn-refresh-audio" title="Rescan connected headphones and microphones">↻ Refresh</button>
+                      </div>
+                    </div>
+                    <select class="nv-select" id="mic-device-select"></select>
+                  </div>
+
+                  <!-- Automatic Bluetooth Headphones Mic/Stereo banner (only shown when BT headphones are connected) -->
+                  <div class="bt-banner" id="bt-banner" style="display:none;"></div>
+
+                  <!-- 15-pill Broadcast 2.3.0 Audio Meter -->
+                  <div class="meter-row">
+                    <div class="audio-meter-pills" id="mic-meter-pills"></div>
+                    <span class="meter-db" id="mic-meter-db">-90 dB</span>
+                  </div>
+
+                  <div class="effects-heading">EFFECTS</div>
+                  <div class="effects-stack" id="mic-effects-list"></div>
+
+                  <!-- Compact Linux Mic Cleanup Row -->
+                  <div class="mini-toggles">
+                    <label class="mini-check" title="Removes laptop fan and AC hum below 85 Hz">
+                      <input type="checkbox" id="mic-hpf-toggle" />
+                      <span>Fan Rumble Filter (85 Hz)</span>
+                    </label>
+                    <label class="mini-check" title="Silences mic floor between sentences">
+                      <input type="checkbox" id="mic-gate-toggle" />
+                      <span>Noise Gate</span>
+                    </label>
+                    <label class="mini-check" title="Speech-gated auto-gain for quiet laptop mics">
+                      <input type="checkbox" id="mic-agc-toggle" />
+                      <span>Voice Auto-Gain</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Speakers Card -->
+              <div class="device-card">
+                <div class="device-header">
+                  <div class="device-header-left">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#76b900" stroke-width="2">
+                      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                      <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                      <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+                    </svg>
+                    <div>
+                      <div class="device-title">Speakers</div>
+                      <div class="device-sub" id="spk-engine-status">Virtual speakers inactive</div>
+                    </div>
+                  </div>
+                  <label class="nv-switch" title="Start or stop Virtual Speakers">
+                    <input type="checkbox" id="spk-master-toggle" />
+                    <span class="nv-switch-track"></span>
+                  </label>
+                </div>
+
+                <div class="device-body">
+                  <div class="field-row">
+                    <div class="field-head-row">
+                      <label class="field-label">Speaker / Headphones output</label>
+                      <button class="chip-btn" id="btn-spk-default" title="Route all Linux apps through NVIDIA Broadcast (Speakers) into your headphones">Use as Default Output</button>
+                    </div>
+                    <select class="nv-select" id="spk-device-select"></select>
+                  </div>
+
+                  <div class="meter-row">
+                    <div class="audio-meter-pills" id="spk-meter-pills"></div>
+                    <span class="meter-db" id="spk-meter-db">-90 dB</span>
+                  </div>
+
+                  <div class="effects-heading">EFFECTS</div>
+                  <div class="effects-stack" id="spk-effects-list"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Column: Test Microphone Waveform & Speaker Noise Tester -->
+            <div class="preview-column">
+              <!-- Mic Test Waveform Card -->
+              <div class="studio-card">
+                <div class="studio-card-head">
+                  <div>
+                    <div class="studio-title">Test Microphone</div>
+                    <div class="studio-sub">Record 5 seconds and toggle effects to compare raw vs Broadcast audio.</div>
+                  </div>
+                  <span class="badge-pill" id="mic-test-badge">Ready</span>
+                </div>
+
+                <div class="waveform-well">
+                  <canvas id="mic-waveform-canvas" width="540" height="110"></canvas>
+                </div>
+
+                <div class="studio-controls">
+                  <button class="nv-btn nv-btn-primary" id="btn-mic-record">Record 5s</button>
+                  <button class="nv-btn" id="btn-mic-play" disabled>Play</button>
+                  <button class="nv-btn" id="btn-mic-stop" disabled>Stop</button>
+                  <div class="spacer"></div>
+                  <label class="ab-toggle">
+                    <span>Apply Effects</span>
+                    <label class="nv-switch nv-switch-sm">
+                      <input type="checkbox" id="mic-test-ab-toggle" checked />
+                      <span class="nv-switch-track"></span>
+                    </label>
+                  </label>
+                </div>
+                <div class="studio-footnote" id="mic-test-info">Select "NVIDIA Broadcast (Microphone)" in Discord, Zoom, Meet, or OBS once Virtual Mic is on.</div>
+              </div>
+
+              <!-- Speaker Sample Test Card -->
+              <div class="studio-card">
+                <div class="studio-card-head">
+                  <div>
+                    <div class="studio-title">Test Speakers</div>
+                    <div class="studio-sub">Play noisy audio samples and toggle effects to hear neural cleanup live.</div>
+                  </div>
+                  <span class="badge-pill" id="spk-sample-badge">RNNoise</span>
+                </div>
+
+                <div class="sample-row">
+                  <select class="nv-select" id="spk-sample-select">
+                    <option value="fan">Laptop Fan &amp; AC Hum</option>
+                    <option value="typing">Mechanical Keyboard Typing</option>
+                    <option value="echo">Room Echo / Reverb</option>
+                    <option value="fan_echo">Fan Noise + Room Echo</option>
+                    <option value="typing_echo">Keyboard Typing + Echo</option>
+                  </select>
+                  <button class="nv-btn nv-btn-primary" id="btn-spk-play">Play Sample</button>
+                  <button class="nv-btn" id="btn-spk-stop">Stop</button>
+                </div>
+
+                <div class="waveform-well waveform-well-sm">
+                  <canvas id="spk-waveform-canvas" width="540" height="82"></canvas>
+                </div>
+
+                <div class="studio-controls">
+                  <span class="studio-footnote" id="spk-sample-info">Toggle Apply Effects to compare raw noisy audio vs neural-cleaned output.</span>
+                  <div class="spacer"></div>
+                  <label class="ab-toggle">
+                    <span>Apply Effects</span>
+                    <label class="nv-switch nv-switch-sm">
+                      <input type="checkbox" id="spk-test-ab-toggle" checked />
+                      <span class="nv-switch-track"></span>
+                    </label>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== CAMERA PAGE ==================== -->
+        <section class="page" id="page-camera">
+          <div class="horizontal-split">
+            <!-- Left Column: Camera Source & Effects -->
+            <div class="controls-column controls-column-cam">
+              <div class="device-card">
+                <div class="device-header">
+                  <div class="device-header-left">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#76b900" stroke-width="2">
+                      <rect x="2" y="6" width="14" height="12" rx="2"/>
+                      <path d="M16 10l6-3v10l-6-3z"/>
+                    </svg>
+                    <div>
+                      <div class="device-title">Camera</div>
+                      <div class="device-sub" id="cam-engine-status">Camera inactive</div>
+                    </div>
+                  </div>
+                  <label class="nv-switch" title="Start or stop Camera">
+                    <input type="checkbox" id="cam-master-toggle" />
+                    <span class="nv-switch-track"></span>
+                  </label>
+                </div>
+
+                <div class="device-body">
+                  <div class="field-grid-2">
+                    <div class="field-row">
+                      <label class="field-label">Camera source</label>
+                      <select class="nv-select" id="cam-device-select"></select>
+                    </div>
+                    <div class="field-row">
+                      <label class="field-label">Resolution &amp; FPS</label>
+                      <select class="nv-select" id="cam-res-select">
+                        <option value="1280x720@30">1280 × 720 @ 30 FPS</option>
+                        <option value="1280x720@15">1280 × 720 @ 15 FPS</option>
+                        <option value="640x480@30">640 × 480 @ 30 FPS</option>
+                        <option value="640x360@30">640 × 360 @ 30 FPS</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="effects-heading">CAMERA EFFECTS</div>
+                  <div class="effects-stack" id="cam-effects-list"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Column: 16:9 Live Preview Stage + Split Screen + V4L2 Drawer -->
+            <div class="preview-column preview-column-cam">
+              <div class="camera-stage-card">
+                <div class="camera-stage" id="camera-stage">
+                  <img id="camera-stream-img" alt="Live Camera Preview" />
+                  <div class="camera-empty" id="camera-empty">
+                    <svg viewBox="0 0 24 24" width="44" height="44" fill="none" stroke="#5d5d5d" stroke-width="1.5">
+                      <rect x="2" y="6" width="14" height="12" rx="2"/>
+                      <path d="M16 10l6-3v10l-6-3z"/>
+                    </svg>
+                    <p>Camera preview is off</p>
+                    <button class="nv-btn nv-btn-primary" id="btn-cam-start-stage">Start Camera</button>
+                  </div>
+
+                  <!-- Overlay Badges -->
+                  <div class="stage-overlay-top" id="stage-overlay-top" style="display:none;">
+                    <span class="stage-chip" id="cam-fps-chip">0.0 FPS</span>
+                    <span class="stage-chip stage-chip-green" id="cam-backend-chip">RVM CUDA</span>
+                    <span class="stage-chip" id="cam-vcam-chip">Preview Only</span>
+                  </div>
+
+                  <!-- Split-Screen Labels & Draggable Curtain -->
+                  <div class="split-overlay" id="split-overlay" style="display:none;">
+                    <span class="split-tag split-tag-left">ORIGINAL</span>
+                    <span class="split-tag split-tag-right">BROADCAST</span>
+                    <div class="split-handle" id="split-handle" title="Drag to compare Before / After"></div>
+                  </div>
+                </div>
+
+                <!-- Preview Toolbar -->
+                <div class="camera-toolbar">
+                  <button class="tool-btn" id="btn-cam-split" title="Before / After Split Screen">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="3" y="4" width="18" height="16" rx="2"/>
+                      <line x1="12" y1="4" x2="12" y2="20"/>
+                    </svg>
+                    <span>Before / After</span>
+                  </button>
+                  <button class="tool-btn" id="btn-cam-mirror" title="Mirror horizontally">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                      <line x1="12" y1="3" x2="12" y2="21" stroke-dasharray="2 2"/>
+                      <polygon points="4 17 9 12 4 7 4 17"/>
+                      <polygon points="20 17 15 12 20 7 20 17"/>
+                    </svg>
+                    <span>Mirror</span>
+                  </button>
+                  <button class="tool-btn" id="btn-cam-snapshot" title="Save Snapshot PNG">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                      <circle cx="12" cy="13" r="4"/>
+                    </svg>
+                    <span>Snapshot</span>
+                  </button>
+                  <div class="spacer"></div>
+                  <button class="tool-btn" id="btn-cam-v4l2" title="Hardware V4L2 Webcam Controls">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                      <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
+                      <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
+                      <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
+                      <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
+                    </svg>
+                    <span>Camera Settings</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Collapsible V4L2 Hardware Controls Drawer -->
+              <div class="studio-card v4l2-drawer" id="v4l2-drawer" style="display:none;">
+                <div class="studio-card-head">
+                  <div>
+                    <div class="studio-title">Hardware Camera Settings (V4L2)</div>
+                    <div class="studio-sub">Adjust webcam exposure, brightness, white balance, and 50/60 Hz anti-flicker directly on hardware.</div>
+                  </div>
+                  <button class="nv-btn nv-btn-sm" id="btn-v4l2-refresh">Refresh</button>
+                </div>
+                <div class="v4l2-grid" id="v4l2-controls-grid"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== FILES PAGE ==================== -->
+        <section class="page" id="page-files">
+          <div class="single-page-wrap">
+            <div class="studio-card">
+              <div class="studio-card-head">
+                <div>
+                  <div class="studio-title">Process Audio &amp; Video Files</div>
+                  <div class="studio-sub">Apply your active neural Microphone &amp; Camera effects to recorded clips offline.</div>
+                </div>
+                <span class="badge-pill" id="file-status-badge">Idle</span>
+              </div>
+
+              <div class="drop-box" id="file-drop-box">
+                <p id="file-selected-label">Choose a WAV, MP3, M4A, MP4, MKV, or WebM file</p>
+                <button class="nv-btn nv-btn-primary" id="btn-pick-file">Browse Media File</button>
+              </div>
+
+              <div class="mini-toggles" style="margin-top:14px;">
+                <label class="mini-check">
+                  <input type="checkbox" id="file-apply-audio" checked />
+                  <span>Apply active Microphone AI effects (RNNoise / De-reverb / Studio Voice)</span>
+                </label>
+                <label class="mini-check">
+                  <input type="checkbox" id="file-apply-video" checked />
+                  <span>Apply active Camera AI effects (for video files)</span>
+                </label>
+              </div>
+
+              <div class="progress-wrap" id="file-progress-wrap" style="display:none;">
+                <div class="progress-bar-bg"><div class="progress-bar-fill" id="file-progress-fill"></div></div>
+                <div class="progress-meta">
+                  <span id="file-progress-msg">Processing...</span>
+                  <span id="file-progress-pct">0%</span>
+                </div>
+              </div>
+
+              <div class="studio-controls" style="margin-top:16px;">
+                <button class="nv-btn nv-btn-primary" id="btn-file-start" disabled>Enhance File</button>
+                <button class="nv-btn" id="btn-file-cancel" style="display:none;">Cancel</button>
+                <button class="nv-btn" id="btn-file-reveal" style="display:none;">Show Output in Folder</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== SETTINGS / DOCTOR PAGE ==================== -->
+        <section class="page" id="page-settings">
+          <div class="single-page-wrap">
+            <div class="studio-card">
+              <div class="studio-card-head">
+                <div>
+                  <div class="studio-title">System &amp; Hardware Diagnostics</div>
+                  <div class="studio-sub">RTX GPU acceleration, PipeWire virtual devices, neural models, and v4l2loopback virtual webcam status.</div>
+                </div>
+                <button class="nv-btn nv-btn-sm" id="btn-doctor-refresh">Re-check</button>
+              </div>
+
+              <div class="doctor-list" id="doctor-list"></div>
+
+              <div class="settings-actions">
+                <button class="nv-btn nv-btn-primary" id="btn-download-models">Verify / Download Neural Models</button>
+                <button class="nv-btn" id="btn-install-pw-filter">Install Persistent PipeWire Mic Filter</button>
+              </div>
+
+              <div class="cmd-box" id="vcam-setup-box">
+                <div class="cmd-box-title">Enable Virtual Camera in Zoom, Meet, Discord &amp; OBS (Fedora)</div>
+                <div class="cmd-box-row">
+                  <code id="vcam-setup-cmd">sudo dnf install -y akmod-v4l2loopback v4l2loopback v4l-utils &amp;&amp; sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="NVIDIA Broadcast Camera" exclusive_caps=1</code>
+                  <button class="nv-btn nv-btn-sm" id="btn-copy-vcam-cmd">Copy</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast"></div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
