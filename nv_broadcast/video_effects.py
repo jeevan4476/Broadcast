@@ -179,6 +179,15 @@ class AutoFrameTracker:
             except Exception:
                 self._face_cascade = None
 
+    def close(self) -> None:
+        lm = self._landmarker
+        self._landmarker = None
+        if lm is not None:
+            try:
+                lm.close()
+            except Exception:
+                pass
+
     def detect_face(self, frame_rgb: Any) -> FaceBox | None:
         """Accepts RGB numpy array or Pillow Image, returns FaceBox (+ 478 landmarks when available)."""
         if isinstance(frame_rgb, Image.Image):
@@ -294,6 +303,16 @@ class PortraitSegmenter:
         self._rvm_state_key = None
         if HAS_NUMPY:
             self._rvm_rec = [np.zeros([1, 1, 1, 1], dtype=np.float32)] * 4
+
+    def close(self) -> None:
+        seg = self._mp_seg
+        self._mp_seg = None
+        if seg is not None:
+            try:
+                seg.close()
+            except Exception:
+                pass
+        self._rvm_sess = None
 
     def _init_backend(self) -> None:
         rvm_path = Path(self.model_file) if self.model_file else model_path("rvm_mobilenetv3")
@@ -468,6 +487,10 @@ class VideoEffectsPipeline:
         self._cached_bg_key = None
         self._cached_bg_np = None
         self._cached_bg_pil = None
+
+    def close(self) -> None:
+        self.tracker.close()
+        self.segmenter.close()
 
     def process_frame_np(self, frame_rgb: Any, camera_cfg: dict[str, Any]) -> tuple[Any, Any]:
         """Fast vectorized OpenCV/NumPy path. Returns (raw_display_rgb, processed_rgb)."""

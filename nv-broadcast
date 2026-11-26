@@ -17,10 +17,15 @@ elif [[ -x "${USER_VENV_PY}" ]]; then
 fi
 
 # Only fall back to system Python if user explicitly asked for legacy --gtk
-if [[ "${1:-}" == "gui" ]] && [[ " $* " == *" --gtk "* ]]; then
-    if ! "${PYTHON_BIN}" -c "import gi" >/dev/null 2>&1; then
-        PYTHON_BIN="/usr/bin/python3"
-    fi
+if [[ "${1:-}" == "gui" ]]; then
+    for arg in "$@"; do
+        if [[ "${arg}" == "--gtk" ]]; then
+            if ! "${PYTHON_BIN}" -c "import gi" >/dev/null 2>&1; then
+                PYTHON_BIN="/usr/bin/python3"
+            fi
+            break
+        fi
+    done
 fi
 
 exec "${PYTHON_BIN}" -m nv_broadcast.cli "$@"

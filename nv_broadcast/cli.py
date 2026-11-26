@@ -109,6 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
     cam_p.add_argument("--fps", type=int, help="Capture frame rate")
     cam_p.add_argument("--mirror", type=_parse_bool, help="Mirror camera horizontally")
     cam_p.add_argument("--split", type=_parse_bool, help="Enable Before/After split preview")
+    cam_p.add_argument("--on-demand", type=_parse_bool, help="Auto-wake physical webcam when apps open virtual camera")
+    cam_p.add_argument("--idle-timeout", type=float, help="Idle seconds before releasing webcam after apps close it (0.5-60.0)")
     cam_p.add_argument("--blur", type=_parse_bool, help="Enable/disable background_blur")
     cam_p.add_argument("--blur-strength", type=float, help="Background blur strength 0.0-1.0")
     cam_p.add_argument("--blur-mode", choices=BLUR_MODES, help="Background blur mode")
@@ -339,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
             ("fps", "fps"),
             ("mirror", "mirror"),
             ("split", "split_preview"),
+            ("on_demand", "on_demand"),
+            ("idle_timeout", "idle_timeout_sec"),
         ):
             val = getattr(args, attr)
             if val is not None:

@@ -20,7 +20,7 @@ from typing import Any
 from . import __app_name__, __version__
 from .audio_dsp import AudioMeterReading
 from .audio_engine import AudioEngine
-from .config import EFFECT_CATALOG, INCOMPATIBLE_GROUPS, BroadcastConfig
+from .config import EFFECT_CATALOG, INCOMPATIBLE_GROUPS, BroadcastConfig, clamp_float
 from .devices import (
     find_loopback_cameras,
     list_audio_devices,
@@ -135,6 +135,7 @@ class BroadcastRuntime:
                 sig = fresh_sig
                 defaults = dict(fresh_def)
 
+        cam_cfg = self.config.data["camera"]
         return {
             "mic": {
                 "running": self.audio.mic_running,
@@ -157,6 +158,11 @@ class BroadcastRuntime:
                 "segmentation_backend": self.video.segmentation_backend,
                 "face_backend": self.video.face_backend,
                 "last_error": self.video.last_error,
+                "on_demand": bool(cam_cfg.get("on_demand", True)),
+                "idle_timeout_sec": float(cam_cfg.get("idle_timeout_sec", 3.0)),
+                "on_demand_active": bool(self.video.on_demand_active),
+                "external_consumers": list(self.video.external_consumers),
+                "standby_active": bool(self.video.standby_active),
             },
             "gpu": gpu,
             "device_sig": sig,
@@ -457,10 +463,26 @@ def make_handler(runtime: BroadcastRuntime, auth_token: str) -> type[BaseHTTPReq
                         if key in ("device", "output_device", "width", "height", "fps") and cam.get(key) != body[key]:
                             restart = True
                         cam[key] = body[key]
+                on_demand_changed = False
+                if "on_demand" in body:
+                    cam["on_demand"] = bool(body["on_demand"])
+                    on_demand_changed = True
+                if "idle_timeout_sec" in body:
+                    cam["idle_timeout_sec"] = clamp_float(body["idle_timeout_sec"], 0.5, 60.0, 3.0)
+                    on_demand_changed = True
                 runtime.config.save()
+                if on_demand_changed:
+                    runtime.video.set_on_demand(
+                        bool(cam.get("on_demand", True)),
+                        idle_timeout_sec=float(cam.get("idle_timeout_sec", 3.0)),
+                    )
                 if restart and runtime.video.running:
+                    was_on_demand = runtime.video.on_demand_active and not runtime.video.manual_active
                     runtime.video.stop()
-                    runtime.video.start()
+                    runtime.video.start(_from_on_demand=was_on_demand)
+                elif restart and runtime.video.standby_active:
+                    runtime.video.stop_standby(permanent=False)
+                    runtime.video.start_standby()
                 self._send_json({"ok": True, "config": runtime.config.data})
                 return
 

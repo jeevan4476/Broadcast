@@ -156,6 +156,7 @@ class FileProcessor:
         dec = subprocess.run(
             [
                 "ffmpeg",
+                "-nostdin",
                 "-hide_banner",
                 "-loglevel",
                 "error",
@@ -170,6 +171,7 @@ class FileProcessor:
                 "s16le",
                 "-",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=False,
         )
@@ -203,7 +205,8 @@ class FileProcessor:
                 shutil.copy2(clean_wav, dst)
             else:
                 enc = subprocess.run(
-                    ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(clean_wav), str(dst)],
+                    ["ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error", "-i", str(clean_wav), str(dst)],
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     check=False,
@@ -254,18 +257,19 @@ class FileProcessor:
                 finally:
                     cap.release()
                     writer.release()
+                    pipe.close()
 
                 if self._cancel.is_set():
                     return
                 video_src = raw_vid
 
             self._update(message="Muxing final output...", progress=92.0)
-            cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_src)]
+            cmd = ["ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_src)]
             if has_clean_audio:
                 cmd += ["-i", str(clean_wav), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(dst)]
             else:
                 cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", str(dst)]
-            enc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            enc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
             if enc.returncode != 0:
                 raise RuntimeError(enc.stderr.strip() or "ffmpeg mux failed")
             self._update(progress=100.0)
