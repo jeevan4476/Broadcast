@@ -13,6 +13,161 @@ from typing import Any
 VIRTUAL_MIC_SINK_NAME = "nv_broadcast_mic_bus"
 VIRTUAL_MIC_SOURCE_NAME = "nv_broadcast_mic"
 VIRTUAL_SPEAKER_SINK_NAME = "nv_broadcast_speakers"
+VIRTUAL_NODE_NAMES = (
+    VIRTUAL_MIC_SINK_NAME,
+    VIRTUAL_MIC_SOURCE_NAME,
+    VIRTUAL_SPEAKER_SINK_NAME,
+)
+
+
+def is_virtual_broadcast_node(name: str) -> bool:
+    """Return True if a PipeWire node/device name belongs to Broadcast's own virtual devices."""
+    low = (name or "").strip().lower()
+    if not low:
+        return False
+    return any(v in low for v in VIRTUAL_NODE_NAMES)
+
+
+def build_isolated_pw_cat_cmd(
+    mode: str,
+    node_name: str,
+    rate: int = 48000,
+    channels: int = 2,
+    latency_ms: int = 20,
+) -> list[str]:
+    """Build a pw-cat command isolated from WirePlumber auto-routing/reconnection.
+
+    Setting both `node.autoconnect = false` and `node.dont-reconnect = true` ensures
+    WirePlumber never auto-moves a Broadcast capture/playback stream onto another
+    sink's monitor or back into a virtual sink (preventing acoustic/digital feedback loops).
+    """
+    flag = "--record" if mode == "record" else "--playback"
+    props = f'{{ node.name = "{node_name}" node.autoconnect = false node.dont-reconnect = true }}'
+    return [
+        "pw-cat",
+        flag,
+        "--raw",
+        "--format=s16",
+        f"--rate={int(rate)}",
+        f"--channels={int(channels)}",
+        f"--latency={int(latency_ms)}ms",
+        "-P",
+        props,
+        "-",
+    ]
+
+
+def list_pw_ports(direction: str = "output", timeout: float = 2.5) -> list[str]:
+    """List PipeWire port names via `pw-link -o` (output) or `pw-link -i` (input)."""
+    if not shutil.which("pw-link"):
+        return []
+    flag = "-o" if direction == "output" else "-i"
+    try:
+        proc = subprocess.run(
+            ["pw-link", flag],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return []
+        return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def select_port_pairs(
+    src_node: str,
+    dst_node: str,
+    out_ports: list[str],
+    in_ports: list[str],
+    *,
+    src_prefix: str = "",
+    dst_prefix: str = "",
+) -> list[tuple[str, str]]:
+    """Pair matching PipeWire ports between src_node and dst_node deterministically."""
+    src_head = f"{src_node}:"
+    dst_head = f"{dst_node}:"
+    src_list = [p for p in out_ports if p.startswith(src_head) and p[len(src_head):].startswith(src_prefix)]
+    dst_list = [p for p in in_ports if p.startswith(dst_head) and p[len(dst_head):].startswith(dst_prefix)]
+    if not src_list or not dst_list:
+        return []
+
+    def _chan(port: str) -> str:
+        suffix = port.split(":", 1)[1]
+        return suffix.rsplit("_", 1)[-1].upper() if "_" in suffix else suffix.upper()
+
+    src_by_ch = {_chan(p): p for p in src_list}
+    dst_by_ch = {_chan(p): p for p in dst_list}
+
+    # Exact stereo or mono channel matches first
+    pairs: list[tuple[str, str]] = []
+    for ch in ("FL", "FR", "MONO"):
+        if ch in src_by_ch and ch in dst_by_ch:
+            pairs.append((src_by_ch[ch], dst_by_ch[ch]))
+    if pairs:
+        return pairs
+
+    # Stereo source -> single mono input (use FL / first channel to avoid +6 dB summing)
+    if len(dst_list) == 1:
+        return [(src_by_ch.get("FL", src_list[0]), dst_list[0])]
+
+    # Mono source -> stereo sink (feed both L and R)
+    if len(src_list) == 1:
+        return [(src_list[0], dp) for dp in dst_list[:2]]
+
+    # Positional fallback (e.g. AUX0/AUX1)
+    return list(zip(src_list, dst_list))
+
+
+def link_pw_nodes(
+    src_node: str,
+    dst_node: str,
+    *,
+    src_prefix: str = "",
+    dst_prefix: str = "",
+    allow_virtual_src: bool = False,
+    allow_virtual_dst: bool = False,
+) -> tuple[bool, list[tuple[str, str]]]:
+    """Explicitly link two PipeWire nodes with hard anti-loop guards."""
+    if not src_node or not dst_node or src_node == dst_node:
+        return False, []
+    if not allow_virtual_src and is_virtual_broadcast_node(src_node):
+        return False, []
+    if not allow_virtual_dst and is_virtual_broadcast_node(dst_node):
+        return False, []
+    if not shutil.which("pw-link"):
+        return False, []
+
+    pairs = select_port_pairs(
+        src_node,
+        dst_node,
+        list_pw_ports("output"),
+        list_pw_ports("input"),
+        src_prefix=src_prefix,
+        dst_prefix=dst_prefix,
+    )
+    if not pairs:
+        return False, []
+
+    linked: list[tuple[str, str]] = []
+    for sp, dp in pairs:
+        try:
+            res = subprocess.run(
+                ["pw-link", sp, dp],
+                capture_output=True,
+                text=True,
+                timeout=2.5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False, linked
+        if res.returncode == 0 or "file exists" in (res.stderr or "").lower():
+            linked.append((sp, dp))
+        else:
+            return False, linked
+    return bool(linked), linked
 
 
 @dataclass

@@ -30,9 +30,12 @@ from .pipewire import (
     VIRTUAL_SPEAKER_SINK_NAME,
     PipeWireVirtualManager,
     _run_pactl,
+    build_isolated_pw_cat_cmd,
     generate_deepfilter_filter_chain_conf,
     generate_rnnoise_filter_chain_conf,
     generate_webrtc_echo_cancel_conf,
+    is_virtual_broadcast_node,
+    link_pw_nodes,
 )
 
 try:
@@ -275,78 +278,70 @@ class AudioEngine:
                 mic_cfg = self.config.data["microphone"]
                 rate = int(mic_cfg.get("sample_rate", 48000))
                 target = self.resolve_physical_mic()
+                if not target or is_virtual_broadcast_node(target):
+                    self._mic_stop.wait(1.0)
+                    continue
 
-                if shutil.which("parec") and target:
-                    rec_cmd = [
-                        "parec",
-                        "--raw",
-                        "--format=s16le",
-                        f"--rate={rate}",
-                        "--channels=1",
-                        "--latency-msec=20",
-                        "-d",
-                        target,
-                    ]
-                else:
-                    rec_cmd = [
-                        "pw-cat",
-                        "--record",
-                        "--raw",
-                        "--format=s16",
-                        f"--rate={rate}",
-                        "--channels=1",
-                        "--latency=20ms",
-                    ]
-                    if target:
-                        rec_cmd.append(f"--target={target}")
-                    rec_cmd.append("-")
-
-                # Use node.autoconnect=false + explicit pw-link so processed mic NEVER leaks into Headphones!
+                # Isolate both capture and feed from WirePlumber auto-routing/reconnection
+                # so processed mic audio can NEVER leak to speakers or loop into itself.
+                cap_name = "nvb_mic_cap"
                 feeder_name = "nvb_mic_feed"
-                play_cmd = [
-                    "pw-cat",
-                    "--playback",
-                    "--raw",
-                    "--format=s16",
-                    f"--rate={rate}",
-                    "--channels=1",
-                    "--latency=20ms",
-                    "-P",
-                    f'{{ node.name = "{feeder_name}" node.autoconnect = false }}',
-                    "-",
-                ]
+                rec_cmd = build_isolated_pw_cat_cmd("record", cap_name, rate=rate, channels=1, latency_ms=20)
+                play_cmd = build_isolated_pw_cat_cmd("playback", feeder_name, rate=rate, channels=1, latency_ms=20)
 
                 rec_proc: subprocess.Popen[bytes] | None = None
                 play_proc: subprocess.Popen[bytes] | None = None
                 last_check = time.monotonic()
-                linked = False
+                cap_linked = False
+                feed_linked = False
                 try:
                     rec_proc = subprocess.Popen(rec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     play_proc = subprocess.Popen(play_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     assert rec_proc.stdout is not None and play_proc.stdin is not None
 
-                    def _ensure_link() -> bool:
-                        if not shutil.which("pw-link"):
-                            return True
-                        r = subprocess.run(
-                            ["pw-link", f"{feeder_name}:output_MONO", f"{VIRTUAL_MIC_SOURCE_NAME}:input_MONO"],
-                            capture_output=True,
-                            check=False,
-                        )
-                        return r.returncode == 0
+                    def _ensure_links() -> tuple[bool, bool]:
+                        ok_cap = cap_linked
+                        ok_feed = feed_linked
+                        if not ok_cap:
+                            ok_cap, _ = link_pw_nodes(
+                                target,
+                                cap_name,
+                                src_prefix="capture_",
+                                dst_prefix="input_",
+                                allow_virtual_src=False,
+                                allow_virtual_dst=False,
+                            )
+                        if not ok_feed:
+                            ok_feed, _ = link_pw_nodes(
+                                feeder_name,
+                                VIRTUAL_MIC_SOURCE_NAME,
+                                src_prefix="output_",
+                                dst_prefix="input_",
+                                allow_virtual_src=False,
+                                allow_virtual_dst=True,
+                            )
+                        return ok_cap, ok_feed
+
+                    # Link BEFORE blocking on rec_proc.stdout.read() because node.autoconnect=false
+                    # means pw-cat --record will not emit frames until its input port is linked.
+                    deadline = time.monotonic() + 3.0
+                    while not self._mic_stop.is_set() and not (cap_linked and feed_linked) and time.monotonic() < deadline:
+                        cap_linked, feed_linked = _ensure_links()
+                        if not (cap_linked and feed_linked):
+                            self._mic_stop.wait(0.05)
 
                     while not self._mic_stop.is_set():
                         raw = rec_proc.stdout.read(chunk_bytes)
                         if not raw:
                             break
+                        if not (cap_linked and feed_linked):
+                            cap_linked, feed_linked = _ensure_links()
                         processed = self.mic_processor.process_pcm16(raw, self.config.data["microphone"])
                         try:
                             play_proc.stdin.write(processed)
                             play_proc.stdin.flush()
                         except BrokenPipeError:
                             break
-                        if not linked:
-                            linked = _ensure_link()
                         meter = self.mic_processor.last_meter
                         for cb in list(self._meter_callbacks):
                             try:
@@ -369,6 +364,7 @@ class AudioEngine:
                                 proc.wait(timeout=1.0)
                             except subprocess.TimeoutExpired:
                                 proc.kill()
+                                proc.wait(timeout=1.0)
                 if not self._mic_stop.is_set():
                     time.sleep(0.25)
         finally:
@@ -421,57 +417,65 @@ class AudioEngine:
                 spk_cfg = self.config.data["speaker"]
                 rate = int(spk_cfg.get("sample_rate", 48000))
                 out_dev = self.resolve_physical_speaker()
+                if not out_dev or is_virtual_broadcast_node(out_dev):
+                    self._spk_stop.wait(1.0)
+                    continue
 
-                if shutil.which("parec"):
-                    rec_cmd = [
-                        "parec",
-                        "--raw",
-                        "--format=s16le",
-                        f"--rate={rate}",
-                        f"--channels={channels}",
-                        "--latency-msec=20",
-                        "-d",
-                        f"{VIRTUAL_SPEAKER_SINK_NAME}.monitor",
-                    ]
-                else:
-                    rec_cmd = [
-                        "pw-cat",
-                        "--record",
-                        "--raw",
-                        "--format=s16",
-                        f"--rate={rate}",
-                        f"--channels={channels}",
-                        "--latency=20ms",
-                        "-P",
-                        "stream.capture.sink=true",
-                        f"--target={VIRTUAL_SPEAKER_SINK_NAME}",
-                        "-",
-                    ]
-                play_cmd = [
-                    "pw-cat",
-                    "--playback",
-                    "--raw",
-                    "--format=s16",
-                    f"--rate={rate}",
-                    f"--channels={channels}",
-                    "--latency=20ms",
-                ]
-                if out_dev:
-                    play_cmd.append(f"--target={out_dev}")
-                play_cmd.append("-")
+                # Isolate both capture and playback from WirePlumber auto-routing/reconnection:
+                # prevents WirePlumber from EVER moving capture onto the physical speaker's monitor
+                # (which causes an infinite echo loop) or moving playback back into nv_broadcast_speakers.
+                cap_name = "nvb_spk_cap"
+                out_name = "nvb_spk_out"
+                rec_cmd = build_isolated_pw_cat_cmd("record", cap_name, rate=rate, channels=channels, latency_ms=20)
+                play_cmd = build_isolated_pw_cat_cmd("playback", out_name, rate=rate, channels=channels, latency_ms=20)
 
                 rec_proc: subprocess.Popen[bytes] | None = None
                 play_proc: subprocess.Popen[bytes] | None = None
                 last_check = time.monotonic()
+                cap_linked = False
+                out_linked = False
                 try:
                     rec_proc = subprocess.Popen(rec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     play_proc = subprocess.Popen(play_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     assert rec_proc.stdout is not None and play_proc.stdin is not None
 
+                    def _ensure_links() -> tuple[bool, bool]:
+                        ok_cap = cap_linked
+                        ok_out = out_linked
+                        if not ok_cap:
+                            ok_cap, _ = link_pw_nodes(
+                                VIRTUAL_SPEAKER_SINK_NAME,
+                                cap_name,
+                                src_prefix="monitor_",
+                                dst_prefix="input_",
+                                allow_virtual_src=True,
+                                allow_virtual_dst=False,
+                            )
+                        if not ok_out:
+                            ok_out, _ = link_pw_nodes(
+                                out_name,
+                                out_dev,
+                                src_prefix="output_",
+                                dst_prefix="playback_",
+                                allow_virtual_src=False,
+                                allow_virtual_dst=False,
+                            )
+                        return ok_cap, ok_out
+
+                    # Link BEFORE blocking on rec_proc.stdout.read() because node.autoconnect=false
+                    # means pw-cat --record will not emit frames until its input port is linked.
+                    deadline = time.monotonic() + 3.0
+                    while not self._spk_stop.is_set() and not (cap_linked and out_linked) and time.monotonic() < deadline:
+                        cap_linked, out_linked = _ensure_links()
+                        if not (cap_linked and out_linked):
+                            self._spk_stop.wait(0.05)
+
                     while not self._spk_stop.is_set():
                         raw = rec_proc.stdout.read(chunk_bytes)
                         if not raw:
                             break
+                        if not (cap_linked and out_linked):
+                            cap_linked, out_linked = _ensure_links()
                         cur_spk_cfg = self.config.data["speaker"]
                         if stereo and len(raw) >= 4:
                             usable = (len(raw) // 4) * 4
@@ -527,6 +531,7 @@ class AudioEngine:
                                 proc.wait(timeout=1.0)
                             except subprocess.TimeoutExpired:
                                 proc.kill()
+                                proc.wait(timeout=1.0)
                 if not self._spk_stop.is_set():
                     time.sleep(0.25)
         finally:
