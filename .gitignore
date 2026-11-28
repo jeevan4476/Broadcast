@@ -19,3 +19,4 @@ pnpm-lock.yaml
 daemon.json
 config.json
 .DS_Store
+rust/target/

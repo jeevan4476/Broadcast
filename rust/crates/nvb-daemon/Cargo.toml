@@ -1,0 +1,11 @@
+[package]
+name = "nvb-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nvb-core.workspace = true
+nvb-audio.workspace = true
+nvb-video.workspace = true
+serde_json.workspace = true

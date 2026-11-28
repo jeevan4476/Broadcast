@@ -1,0 +1,425 @@
+{
+  "audio_constants": {
+    "sample_rate": 48000,
+    "rnnoise_frame_samples": 480,
+    "default_meter": {
+      "input_rms_db": -90.0,
+      "output_rms_db": -90.0,
+      "input_peak_db": -90.0,
+      "output_peak_db": -90.0,
+      "noise_reduction_db": 0.0,
+      "speech_prob": 0.0,
+      "gate_open": false,
+      "backend": "dsp"
+    }
+  },
+  "rms_cases": [
+    {
+      "name": "empty",
+      "samples": [],
+      "sample_count": 0,
+      "is_sine_440hz_480": false,
+      "rms_db": -90.0,
+      "peak_db": -90.0,
+      "pcm16_len_bytes": 0,
+      "pcm16_head_hex": "",
+      "roundtrip_head": []
+    },
+    {
+      "name": "silence",
+      "samples": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "sample_count": 64,
+      "is_sine_440hz_480": false,
+      "rms_db": -90.0,
+      "peak_db": -90.0,
+      "pcm16_len_bytes": 128,
+      "pcm16_head_hex": "00000000000000000000000000000000",
+      "roundtrip_head": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "full_scale_dc",
+      "samples": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "sample_count": 16,
+      "is_sine_440hz_480": false,
+      "rms_db": 0.0,
+      "peak_db": 0.0,
+      "pcm16_len_bytes": 32,
+      "pcm16_head_hex": "ff7fff7fff7fff7fff7fff7fff7fff7f",
+      "roundtrip_head": [
+        0.99996948,
+        0.99996948,
+        0.99996948,
+        0.99996948,
+        0.99996948,
+        0.99996948,
+        0.99996948,
+        0.99996948
+      ]
+    },
+    {
+      "name": "half_scale_alt",
+      "samples": [
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5
+      ],
+      "sample_count": 32,
+      "is_sine_440hz_480": false,
+      "rms_db": -6.0206,
+      "peak_db": -6.0206,
+      "pcm16_len_bytes": 64,
+      "pcm16_head_hex": "004000c0004000c0004000c0004000c0",
+      "roundtrip_head": [
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5,
+        0.5,
+        -0.5
+      ]
+    },
+    {
+      "name": "sine_440hz_480",
+      "samples": [],
+      "sample_count": 480,
+      "is_sine_440hz_480": true,
+      "rms_db": -8.959989,
+      "peak_db": -6.0206,
+      "pcm16_len_bytes": 960,
+      "pcm16_head_hex": "0000af035b07010b9d0e2d12ae151c19",
+      "roundtrip_head": [
+        0.0,
+        0.02877808,
+        0.0574646,
+        0.08596802,
+        0.11416626,
+        0.14199829,
+        0.16937256,
+        0.19616699
+      ]
+    }
+  ],
+  "sample_clips": {
+    "fan": {
+      "sample_rate": 48000,
+      "duration_sec": 1.0,
+      "byte_len": 96000,
+      "rms_db": -18.3547,
+      "peak_db": -11.3878
+    },
+    "typing": {
+      "sample_rate": 48000,
+      "duration_sec": 1.0,
+      "byte_len": 96000,
+      "rms_db": -18.3547,
+      "peak_db": -11.3878
+    },
+    "echo": {
+      "sample_rate": 48000,
+      "duration_sec": 1.0,
+      "byte_len": 96000,
+      "rms_db": -18.3547,
+      "peak_db": -11.3878
+    }
+  },
+  "pipewire": {
+    "virtual_mic_sink_name": "nv_broadcast_mic_bus",
+    "virtual_mic_source_name": "nv_broadcast_mic",
+    "virtual_speaker_sink_name": "nv_broadcast_speakers",
+    "virtual_node_names": [
+      "nv_broadcast_mic_bus",
+      "nv_broadcast_mic",
+      "nv_broadcast_speakers"
+    ],
+    "virtual_checks": {
+      "nv_broadcast_mic": true,
+      "nv_broadcast_mic_bus.monitor": true,
+      "NV_BROADCAST_SPEAKERS": true,
+      "alsa_input.pci-0000_00_1f.3": false,
+      "": false
+    },
+    "isolated_pw_cat_record": [
+      "pw-cat",
+      "--record",
+      "--raw",
+      "--format=s16",
+      "--rate=48000",
+      "--channels=1",
+      "--latency=20ms",
+      "-P",
+      "{ node.name = \"nv_broadcast_mic_capture\" node.autoconnect = false node.dont-reconnect = true }",
+      "-"
+    ],
+    "isolated_pw_cat_playback": [
+      "pw-cat",
+      "--playback",
+      "--raw",
+      "--format=s16",
+      "--rate=48000",
+      "--channels=2",
+      "--latency=20ms",
+      "-P",
+      "{ node.name = \"nv_broadcast_spk_playback\" node.autoconnect = false node.dont-reconnect = true }",
+      "-"
+    ],
+    "sample_pw_links_raw": "alsa_input.pci-0000_00_1f.3:capture_FL\n  |-> nv_broadcast_mic_capture:input_FL\nalsa_input.pci-0000_00_1f.3:capture_FR\n  |-> nv_broadcast_mic_capture:input_FR\nnv_broadcast_speakers:monitor_FL\n  |-> nv_broadcast_spk_capture:input_FL\n  |-> other_app:input_FL",
+    "parsed_pw_links": [
+      [
+        "alsa_input.pci-0000_00_1f.3:capture_FL",
+        "nv_broadcast_mic_capture:input_FL"
+      ],
+      [
+        "alsa_input.pci-0000_00_1f.3:capture_FR",
+        "nv_broadcast_mic_capture:input_FR"
+      ],
+      [
+        "nv_broadcast_speakers:monitor_FL",
+        "nv_broadcast_spk_capture:input_FL"
+      ],
+      [
+        "nv_broadcast_speakers:monitor_FL",
+        "other_app:input_FL"
+      ]
+    ],
+    "link_active_true": true,
+    "link_active_false": false,
+    "port_pairing": {
+      "out_ports": [
+        "phys_mic:capture_FL",
+        "phys_mic:capture_FR",
+        "mono_mic:capture_MONO",
+        "aux_src:output_AUX0",
+        "aux_src:output_AUX1"
+      ],
+      "in_ports": [
+        "cap_stereo:input_FL",
+        "cap_stereo:input_FR",
+        "cap_mono:input_MONO",
+        "cap_aux:input_AUX0",
+        "cap_aux:input_AUX1"
+      ],
+      "stereo_to_stereo": [
+        [
+          "phys_mic:capture_FL",
+          "cap_stereo:input_FL"
+        ],
+        [
+          "phys_mic:capture_FR",
+          "cap_stereo:input_FR"
+        ]
+      ],
+      "stereo_to_mono": [
+        [
+          "phys_mic:capture_FL",
+          "cap_mono:input_MONO"
+        ]
+      ],
+      "mono_to_stereo": [
+        [
+          "mono_mic:capture_MONO",
+          "cap_stereo:input_FL"
+        ],
+        [
+          "mono_mic:capture_MONO",
+          "cap_stereo:input_FR"
+        ]
+      ],
+      "aux_positional": [
+        [
+          "aux_src:output_AUX0",
+          "cap_aux:input_AUX0"
+        ],
+        [
+          "aux_src:output_AUX1",
+          "cap_aux:input_AUX1"
+        ]
+      ]
+    }
+  },
+  "v4l2": {
+    "device": {
+      "path": "/dev/video0",
+      "driver": "uvcvideo",
+      "card": "USB HD Webcam",
+      "bus_info": "usb-0000:00:14.0-1",
+      "is_capture": true,
+      "is_output": false,
+      "is_metadata": false,
+      "is_loopback": false,
+      "formats": [
+        "YUYV",
+        "MJPG"
+      ],
+      "modes": [
+        {
+          "pixel_format": "YUYV",
+          "width": 1280,
+          "height": 720,
+          "fps_options": [
+            10.0,
+            5.0
+          ]
+        },
+        {
+          "pixel_format": "MJPG",
+          "width": 1280,
+          "height": 720,
+          "fps_options": [
+            30.0,
+            15.0
+          ]
+        },
+        {
+          "pixel_format": "YUYV",
+          "width": 640,
+          "height": 480,
+          "fps_options": [
+            30.0
+          ]
+        },
+        {
+          "pixel_format": "MJPG",
+          "width": 640,
+          "height": 480,
+          "fps_options": [
+            30.0
+          ]
+        }
+      ]
+    },
+    "best_hd": [
+      "MJPG",
+      30.0
+    ],
+    "best_vga_prefer_mjpg": [
+      "MJPG",
+      30.0
+    ],
+    "best_fallback_1080p": [
+      "MJPG",
+      30.0
+    ]
+  }
+}

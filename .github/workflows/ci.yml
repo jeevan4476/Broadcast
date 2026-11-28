@@ -79,3 +79,26 @@ jobs:
         run: |
           bash -n nv-broadcast install-deps.sh
           shellcheck nv-broadcast install-deps.sh
+
+  rust:
+    name: Rust Workspace Tests and Clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run Rust workspace tests
+        run: cargo test --workspace
+
+      - name: Run Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
