@@ -4,6 +4,8 @@
 pub mod api_contract;
 pub mod camera_state;
 pub mod config;
+pub mod loopback_monitor;
+pub mod models;
 pub mod routing;
 
 pub const APP_NAME: &str = "NVIDIA Broadcast (Linux)";

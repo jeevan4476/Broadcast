@@ -100,45 +100,52 @@ def render_markdown(report: dict[str, Any]) -> str:
         rs_status = (s1.get("rust") or {}).get("status", "—")
 
         lines.append(
-            "| Scenario | Baseline SNR / Voice-SNR | Python SNR (Delta) | Python SI-SDR (Delta) | "
-            "Python Voice-SNR Gain | Python Silence Atten | Rust Status / Delta SNR |"
+            "| Scenario | Baseline SNR / Voice-SNR | Python Voice-SNR Gain (Sil Atten) | "
+            "Rust Voice-SNR Gain (Sil Atten) | Python vs Rust Parity |"
         )
-        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        lines.append("| --- | ---: | ---: | ---: | ---: |")
+        audio_parity = (report.get("parity") or {}).get("audio_waveform") or {}
         for name in scenario_names:
             b = base_sc.get(name, {})
             p = py_sc.get(name, {})
             r = rs_sc.get(name, {})
-            if "output_snr_db" in b or "output_snr_db" in p:
-                b_snr = f"{_fmt_num(b.get('output_snr_db'), 'dB', 1)} / {_fmt_num(b.get('output_voice_snr_db'), 'dB', 1)}"
-                p_snr = (
-                    f"{_fmt_num(p.get('output_snr_db'), 'dB', 1)} "
-                    f"({_fmt_num(p.get('delta_snr_db'), 'dB', 1, signed=True)})"
+            if "output_snr_db" in b or "output_snr_db" in p or "output_snr_db" in r:
+                b_col = f"{_fmt_num(b.get('output_snr_db'), 'dB', 1)} / {_fmt_num(b.get('output_voice_snr_db'), 'dB', 1)}"
+                p_col = (
+                    f"{_fmt_num(p.get('delta_voice_snr_db'), 'dB', 1, signed=True)} "
+                    f"({_fmt_num(p.get('silence_attenuation_db'), 'dB', 1, signed=True)})"
                     if p
                     else "—"
                 )
-                p_sisdr = (
-                    f"{_fmt_num(p.get('output_si_sdr_db'), 'dB', 1)} "
-                    f"({_fmt_num(p.get('delta_si_sdr_db'), 'dB', 1, signed=True)})"
+                r_col = (
+                    f"{_fmt_num(r.get('delta_voice_snr_db'), 'dB', 1, signed=True)} "
+                    f"({_fmt_num(r.get('silence_attenuation_db'), 'dB', 1, signed=True)})"
+                    if r
+                    else (f"`{rs_status}`" if "rust" in targets else "—")
+                )
+            else:
+                b_col = f"RMS {_fmt_num(b.get('output_rms_db'), 'dB', 1)}"
+                p_safe = "SAFE" if p.get("agc_noise_safety_pass") else "BOOST!"
+                p_col = (
+                    f"{_fmt_num(p.get('rms_delta_db'), 'dB', 1, signed=True)} ({p_safe})"
                     if p
                     else "—"
                 )
-                p_vsnr = _fmt_num(p.get("delta_voice_snr_db"), "dB", 1, signed=True) if p else "—"
-            else:
-                b_snr = f"RMS {_fmt_num(b.get('output_rms_db'), 'dB', 1)}"
-                p_snr = f"RMS {_fmt_num(p.get('output_rms_db'), 'dB', 1)} ({_fmt_num(p.get('rms_delta_db'), 'dB', 1, signed=True)})" if p else "—"
-                safe = p.get("agc_noise_safety_pass")
-                p_sisdr = ("AGC SAFE" if safe else "AGC BOOST!") if safe is not None else "—"
-                p_vsnr = "N/A"
-            p_sil = _fmt_num(p.get("silence_attenuation_db"), "dB", 1, signed=True) if p else "—"
-            if r:
-                r_cell = (
-                    f"{_fmt_num(r.get('delta_snr_db'), 'dB', 1, signed=True)}"
-                    if "delta_snr_db" in r
-                    else f"RMS {_fmt_num(r.get('rms_delta_db'), 'dB', 1, signed=True)}"
-                )
-            else:
-                r_cell = f"`{rs_status}`" if "rust" in targets else "—"
-            lines.append(f"| `{name}` | {b_snr} | {p_snr} | {p_sisdr} | {p_vsnr} | {p_sil} | {r_cell} |")
+                if r:
+                    r_safe = "SAFE" if r.get("agc_noise_safety_pass") else "BOOST!"
+                    r_col = f"{_fmt_num(r.get('rms_delta_db'), 'dB', 1, signed=True)} ({r_safe})"
+                else:
+                    r_col = f"`{rs_status}`" if "rust" in targets else "—"
+            par = audio_parity.get(name)
+            par_col = (
+                f"dRMS {par['rms_delta_db']:+.2f} dB, corr {par['max_cross_correlation']:.3f}"
+                if par
+                else "—"
+            )
+            lines.append(f"| `{name}` | {b_col} | {p_col} | {r_col} | {par_col} |")
+        if (s1.get("rust") or {}).get("peak_rss_mb"):
+            lines.append("")
+            lines.append(f"> **Rust `nvb-audio` peak RSS during WAV processing:** `{s1['rust']['peak_rss_mb']:.2f} MB` (`{s1['rust'].get('backend', 'nnnoiseless')}`)")
         lines.append("")
 
     # Suite 2: Real-Time Audio Latency

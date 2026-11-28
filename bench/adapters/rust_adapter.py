@@ -3,11 +3,10 @@
 Drives the compiled `nvb-cli` (and future `nvb-daemon` / `nvb-camera-worker`)
 binaries using the exact same JSON protocol as `PythonAdapter`.
 
-Works immediately at Phase R0:
-- Executes real Rust benchmarks for implemented subsystems (`config_bench`,
-  `pcm_bench`, CLI cold start, and `reliability` invariants).
-- Automatically queries `nvb-cli bench capabilities` and reports
-  `pending_phase_r1..r3` for unported modules until each phase lands.
+Automatically discovers implemented Rust phases via `nvb-cli bench capabilities`:
+- Phase R0: `config_bench`, `pcm_bench`, CLI cold start, `reliability`
+- Phase R1: `audio_quality` (`audio-file`) + `audio_latency` (`audio-loop`)
+- Phase R2..R3: `memory`, `api_cli` daemon, `system_impact`, `video`
 """
 
 from __future__ import annotations
@@ -16,13 +15,19 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from bench.adapters.base import TargetAdapter
-from bench.metrics.audio_metrics import AudioScenario
-from bench.metrics.system_metrics import compute_percentiles
+from bench.metrics.audio_metrics import (
+    AudioScenario,
+    evaluate_audio_clip,
+    read_wav_mono16,
+    write_wav_mono16,
+)
+from bench.metrics.system_metrics import compute_percentiles, query_pipewire_top
 
 
 class RustAdapter(TargetAdapter):
@@ -44,6 +49,11 @@ class RustAdapter(TargetAdapter):
         return None
 
     def ensure_binary(self, release: bool = False) -> Path | None:
+        if release:
+            rel = self.rust_dir / "target" / "release" / "nvb-cli"
+            if rel.is_file() and os.access(rel, os.X_OK):
+                self._cli_bin = rel
+                return rel
         if self._cli_bin is not None and self._cli_bin.is_file():
             return self._cli_bin
         if not self.auto_build or not shutil.which("cargo") or not (self.rust_dir / "Cargo.toml").is_file():
@@ -51,13 +61,13 @@ class RustAdapter(TargetAdapter):
         cmd = ["cargo", "build", "-p", "nvb-cli"]
         if release:
             cmd.append("--release")
-        res = subprocess.run(cmd, cwd=str(self.rust_dir), capture_output=True, text=True, timeout=180, check=False)
+        res = subprocess.run(cmd, cwd=str(self.rust_dir), capture_output=True, text=True, timeout=240, check=False)
         if res.returncode != 0:
             return None
         self._cli_bin = self._locate_cli_binary()
         return self._cli_bin
 
-    def _run_cli_json(self, args: list[str], timeout: float = 60.0) -> dict[str, Any]:
+    def _run_cli_json(self, args: list[str], timeout: float = 120.0) -> dict[str, Any]:
         cli = self.ensure_binary()
         if cli is None:
             return {"status": "unavailable", "reason": "nvb-cli binary not built and cargo unavailable"}
@@ -116,8 +126,75 @@ class RustAdapter(TargetAdapter):
     ) -> dict[str, Any]:
         if not self._has_cap("audio_dsp"):
             return self._pending_status("audio_quality", "pending_phase_r1")
-        # Hook ready for Phase R1: `nvb-cli bench audio-file --in ... --out ... --config ...`
-        return self._pending_status("audio_quality", "pending_phase_r1")
+
+        audio_dir = out_dir / "audio_ab"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        results: dict[str, Any] = {}
+        delta_snrs: list[float] = []
+        delta_sisdrs: list[float] = []
+        silence_attens: list[float] = []
+        backend = "nnnoiseless"
+        peak_rss_kb = 0
+
+        with tempfile.TemporaryDirectory(prefix="nvb_rust_audio_") as tmpdir:
+            tmp = Path(tmpdir)
+            for sc in scenarios:
+                in_wav = write_wav_mono16(tmp / f"{sc.name}_in.wav", sc.noisy_pcm, sc.sample_rate)
+                cfg_path = tmp / f"{sc.name}_cfg.json"
+                cfg_path.write_text(json.dumps(sc.effect_cfg), encoding="utf-8")
+                out_wav = audio_dir / f"{sc.name}_rust.wav"
+
+                res = self._run_cli_json(
+                    [
+                        "bench",
+                        "audio-file",
+                        "--in",
+                        str(in_wav),
+                        "--out",
+                        str(out_wav),
+                        "--config",
+                        str(cfg_path),
+                    ],
+                    timeout=60.0,
+                )
+                if res.get("status") != "ok":
+                    return {"status": "error", "scenario": sc.name, "error": res.get("reason", "audio-file failed")}
+
+                backend = str(res.get("backend", backend))
+                peak_rss_kb = max(peak_rss_kb, int(res.get("rss_kb", 0)))
+                proc_pcm, _ = read_wav_mono16(out_wav)
+                metrics = evaluate_audio_clip(
+                    noisy_pcm=sc.noisy_pcm,
+                    processed_pcm=proc_pcm,
+                    clean_pcm=sc.clean_pcm,
+                    speech_mask=sc.speech_mask,
+                    sample_rate=sc.sample_rate,
+                )
+                metrics["elapsed_ms"] = res.get("elapsed_ms", 0.0)
+                metrics["meter"] = res.get("meter", {})
+                metrics["wav_path"] = str(out_wav)
+                metrics["description"] = sc.description
+                results[sc.name] = metrics
+                if "delta_snr_db" in metrics:
+                    delta_snrs.append(metrics["delta_snr_db"])
+                if "delta_si_sdr_db" in metrics:
+                    delta_sisdrs.append(metrics["delta_si_sdr_db"])
+                silence_attens.append(metrics["silence_attenuation_db"])
+
+        return {
+            "status": "ok",
+            "backend": backend,
+            "peak_rss_mb": round(peak_rss_kb / 1024.0, 2),
+            "scenarios": results,
+            "summary": {
+                "mean_delta_snr_db": round(sum(delta_snrs) / len(delta_snrs), 3) if delta_snrs else 0.0,
+                "mean_delta_si_sdr_db": round(sum(delta_sisdrs) / len(delta_sisdrs), 3) if delta_sisdrs else 0.0,
+                "mean_silence_attenuation_db": round(sum(silence_attens) / len(silence_attens), 3)
+                if silence_attens
+                else 0.0,
+                "pure_noise_agc_safe": results.get("pure_noise", {}).get("agc_noise_safety_pass", True),
+            },
+        }
 
     def run_audio_latency(
         self,
@@ -125,6 +202,17 @@ class RustAdapter(TargetAdapter):
         frames: int | None = None,
     ) -> dict[str, Any]:
         n_frames = frames if frames is not None else (2000 if profile == "quick" else 10000)
+
+        if self._has_cap("audio_dsp"):
+            res = self._run_cli_json(["bench", "audio-loop", "--frames", str(n_frames)], timeout=180.0)
+            if res.get("status") == "ok":
+                if "rss_kb" in res:
+                    res["rss_mb"] = round(float(res["rss_kb"]) / 1024.0, 2)
+                if profile == "full":
+                    res["pipewire_top"] = query_pipewire_top()
+                return res
+            return res
+
         pcm_prim = None
         if self._has_cap("pcm_bench"):
             raw_pcm = self._run_cli_json(["bench", "pcm-bench", "--frames", str(n_frames)], timeout=60.0)
@@ -148,12 +236,10 @@ class RustAdapter(TargetAdapter):
                     },
                 }
 
-        if not self._has_cap("audio_dsp"):
-            out = self._pending_status("audio_latency", "pending_phase_r1")
-            if pcm_prim is not None:
-                out["pcm_primitive"] = pcm_prim
-            return out
-        return self._pending_status("audio_latency", "pending_phase_r1")
+        out = self._pending_status("audio_latency", "pending_phase_r1")
+        if pcm_prim is not None:
+            out["pcm_primitive"] = pcm_prim
+        return out
 
     def run_memory(
         self,
@@ -186,7 +272,6 @@ class RustAdapter(TargetAdapter):
             else {"status": "pending_phase_r0"}
         )
 
-        # Measure real cold binary startup for `nvb-cli --version` even at Phase R0!
         cli_runs = 5 if profile == "quick" else 15
         ver_times: list[float] = []
         for _ in range(cli_runs):
@@ -198,8 +283,8 @@ class RustAdapter(TargetAdapter):
 
         if not self._has_cap("daemon_http"):
             return {
-                "status": "partial_phase_r0",
-                "phase": self.capabilities().get("phase", "R0"),
+                "status": "partial_phase_r1",
+                "phase": self.capabilities().get("phase", "R1"),
                 "pending_daemon": "pending_phase_r2",
                 "config_bench": config_bench,
                 "cli_cold_start_ms": {

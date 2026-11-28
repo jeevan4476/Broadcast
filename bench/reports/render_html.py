@@ -132,21 +132,44 @@ def render_html(report: dict[str, Any]) -> str:
 
     charts_html: list[str] = []
 
-    # Chart 1: Audio Quality Gain (Delta-SNR & Delta-SI-SDR vs Baseline)
+    # Chart 1: Audio Quality Gain (Voice-SNR Gain vs Baseline, Python vs Rust)
     py_sc = (s1.get("python") or {}).get("scenarios", {})
-    audio_cats = [k for k, v in py_sc.items() if "delta_snr_db" in v]
+    rs_sc = (s1.get("rust") or {}).get("scenarios", {})
+    audio_cats = [k for k, v in (py_sc or rs_sc).items() if "delta_snr_db" in v]
     if audio_cats:
+        audio_series: list[tuple[str, str, list[float | None]]] = []
+        if py_sc:
+            audio_series.append(("Python Voice-SNR Gain", "#38bdf8", [py_sc.get(k, {}).get("delta_voice_snr_db") for k in audio_cats]))
+        if rs_sc:
+            audio_series.append(("Rust Voice-SNR Gain", "#76b900", [rs_sc.get(k, {}).get("delta_voice_snr_db") for k in audio_cats]))
+        else:
+            audio_series.append(("Python Silence Cut", "#a78bfa", [py_sc.get(k, {}).get("silence_attenuation_db") for k in audio_cats]))
         charts_html.append(
             _svg_grouped_bars(
                 "Audio Enhancement Gain vs No Broadcast (Baseline = 0 dB)",
-                "Positive dB = cleaner speech over raw noisy microphone audio",
+                "Positive dB = cleaner speech-to-silence ratio over raw noisy mic audio",
                 audio_cats,
-                [
-                    ("Delta-SI-SDR", "#76b900", [py_sc[k]["delta_si_sdr_db"] for k in audio_cats]),
-                    ("Voice-SNR Gain", "#38bdf8", [py_sc[k].get("delta_voice_snr_db", 0.0) for k in audio_cats]),
-                    ("Silence Floor Cut", "#a78bfa", [py_sc[k]["silence_attenuation_db"] for k in audio_cats]),
-                ],
+                audio_series,
                 unit=" dB",
+            )
+        )
+
+    # Chart 1b: Real-Time Audio 10ms Frame Latency (p99 us, Python vs Rust)
+    py_al = (s2.get("python") or {}).get("workloads") or {}
+    rs_al = (s2.get("rust") or {}).get("workloads") or {}
+    if py_al and rs_al:
+        al_cats = ["noise_removal", "room_echo_removal", "studio_voice"]
+        charts_html.append(
+            _svg_grouped_bars(
+                "Real-Time Audio 10 ms Frame Latency p99 (Lower is Better)",
+                "Rust target <= 500 us (0.5 ms) vs 10,000 us hard real-time xrun budget",
+                al_cats,
+                [
+                    ("Python p99 (us)", "#f59e0b", [py_al.get(k, {}).get("latency_us", {}).get("p99") for k in al_cats]),
+                    ("Rust p99 (us)", "#76b900", [rs_al.get(k, {}).get("latency_us", {}).get("p99") for k in al_cats]),
+                ],
+                unit=" us",
+                reference_line=(500.0, "Rust target (500 us)"),
             )
         )
 

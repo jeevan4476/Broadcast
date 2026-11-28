@@ -1,19 +1,21 @@
 //! NVIDIA Broadcast (Linux) Rust CLI (`nvb-cli`) and unified benchmark driver.
 //!
-//! Phase R0 exposes `bench` subcommands (`capabilities`, `config-bench`,
-//! `pcm-bench`, `reliability`) so the shared `bench/` suite exercises live
-//! Rust crates immediately while reporting pending phases (`R1..R3`) cleanly.
+//! Phase R1 enables full pure-Rust neural audio DSP (`nnnoiseless` + `realfft`)
+//! via `nvb-cli bench audio-file` and `nvb-cli bench audio-loop` alongside the
+//! Phase R0 `capabilities`, `config-bench`, `pcm-bench`, and `reliability` commands.
 
 use std::env;
 use std::f64::consts::PI;
 use std::fs;
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use nvb_audio::{
-    build_isolated_pw_cat_args, compute_rms_db, f32_to_pcm16, is_pw_link_active, parse_pw_links,
-    pcm16_to_f32, PhysicalDevice, PwCatMode, RoutingError, DEFAULT_LATENCY_MS,
-    RNNOISE_FRAME_SAMPLES, SAMPLE_RATE,
+    build_isolated_pw_cat_args, compute_rms_db, f32_to_pcm16, generate_sample_clip,
+    is_pw_link_active, parse_pw_links, pcm16_to_f32, read_wav_mono16, write_wav_mono16,
+    AudioProcessConfig, AudioProcessor, PhysicalDevice, PwCatMode, RoutingError,
+    DEFAULT_LATENCY_MS, RNNOISE_FRAME_SAMPLES, SAMPLE_RATE,
 };
 use nvb_core::camera_state::CameraState;
 use nvb_core::config::BroadcastConfig;
@@ -50,24 +52,60 @@ fn summarize_us(mut samples_us: Vec<f64>) -> Value {
     })
 }
 
+fn summarize_latency_us_map(mut samples_us: Vec<f64>) -> Value {
+    samples_us.sort_by(|a, b| a.total_cmp(b));
+    let total_us: f64 = samples_us.iter().sum();
+    let count = samples_us.len();
+    let mean_us = if count > 0 {
+        total_us / count as f64
+    } else {
+        0.0
+    };
+    json!({
+        "count": count,
+        "min": (percentile(&samples_us, 0.0) * 1000.0).round() / 1000.0,
+        "mean": (mean_us * 1000.0).round() / 1000.0,
+        "p50": (percentile(&samples_us, 0.50) * 1000.0).round() / 1000.0,
+        "p95": (percentile(&samples_us, 0.95) * 1000.0).round() / 1000.0,
+        "p99": (percentile(&samples_us, 0.99) * 1000.0).round() / 1000.0,
+        "p999": (percentile(&samples_us, 0.999) * 1000.0).round() / 1000.0,
+        "max": (percentile(&samples_us, 1.0) * 1000.0).round() / 1000.0,
+    })
+}
+
+fn read_self_rss_kb() -> u64 {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            if let Some(tok) = rest.split_whitespace().next() {
+                if let Ok(kb) = tok.parse::<u64>() {
+                    return kb;
+                }
+            }
+        }
+    }
+    0
+}
+
 fn capabilities_payload() -> Value {
     json!({
         "target": "rust",
         "app": APP_NAME,
         "version": APP_VERSION,
-        "phase": "R0",
+        "phase": "R1",
+        "audio_backend": "nnnoiseless",
         "capabilities": {
             "config_bench": true,
             "pcm_bench": true,
             "reliability_core": true,
-            "audio_dsp": false,
+            "audio_dsp": true,
             "daemon_http": false,
             "cli_full": false,
             "video_pipeline": false
         },
         "pending_phases": {
-            "audio_quality": "pending_phase_r1",
-            "audio_latency": "pending_phase_r1",
             "memory": "pending_phase_r2",
             "video": "pending_phase_r3",
             "api_cli": "pending_phase_r2",
@@ -167,6 +205,168 @@ fn run_pcm_bench(frames: usize) -> Value {
         "rtf": (rtf * 1_000_000.0).round() / 1_000_000.0,
         "last_rms_db": (last_rms * 100.0).round() / 100.0,
         "latency": summarize_us(latencies_us),
+    })
+}
+
+fn run_audio_file_bench(in_path: &str, out_path: &str, cfg_arg: &str) -> Result<Value, String> {
+    let cfg_val: Value = if Path::new(cfg_arg).is_file() {
+        let raw = fs::read_to_string(cfg_arg).map_err(|e| format!("failed reading config: {e}"))?;
+        serde_json::from_str(&raw).map_err(|e| format!("invalid config json file: {e}"))?
+    } else {
+        serde_json::from_str(cfg_arg).map_err(|e| format!("invalid config json: {e}"))?
+    };
+    let cfg = AudioProcessConfig::from_json_value(&cfg_val);
+
+    let (raw_pcm, sr) = read_wav_mono16(Path::new(in_path))
+        .map_err(|e| format!("failed reading input WAV '{in_path}': {e}"))?;
+    let mut proc = AudioProcessor::new(sr);
+    let chunk_bytes = RNNOISE_FRAME_SAMPLES * 2;
+    let mut out_pcm = Vec::with_capacity(raw_pcm.len());
+
+    let t0 = Instant::now();
+    for chunk in raw_pcm.chunks(chunk_bytes) {
+        out_pcm.extend_from_slice(&proc.process_pcm16(chunk, &cfg));
+    }
+    let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    write_wav_mono16(Path::new(out_path), &out_pcm, sr)
+        .map_err(|e| format!("failed writing output WAV '{out_path}': {e}"))?;
+
+    Ok(json!({
+        "status": "ok",
+        "backend": proc.backend_name,
+        "sample_rate": sr,
+        "elapsed_ms": (elapsed_ms * 1000.0).round() / 1000.0,
+        "rss_kb": read_self_rss_kb(),
+        "meter": proc.last_meter,
+    }))
+}
+
+fn run_audio_loop_bench(frames: usize) -> Value {
+    let clip = generate_sample_clip("fan_echo", SAMPLE_RATE, 2.0);
+    let frame_bytes = RNNOISE_FRAME_SAMPLES * 2;
+    let ring: Vec<&[u8]> = clip.chunks_exact(frame_bytes).collect();
+    let audio_sec = (frames * RNNOISE_FRAME_SAMPLES) as f64 / f64::from(SAMPLE_RATE);
+
+    let specs = [
+        (
+            "noise_removal",
+            AudioProcessConfig {
+                highpass_enabled: true,
+                highpass_hz: 85.0,
+                noise_removal_enabled: true,
+                noise_removal_strength: 0.85,
+                room_echo_removal_enabled: false,
+                room_echo_removal_strength: 0.5,
+                studio_voice_enabled: false,
+                studio_voice_profile: "default".to_string(),
+                noise_gate_enabled: true,
+                noise_gate_db: -46.0,
+                auto_gain_enabled: true,
+                auto_gain_target_db: -16.0,
+            },
+        ),
+        (
+            "room_echo_removal",
+            AudioProcessConfig {
+                highpass_enabled: true,
+                highpass_hz: 85.0,
+                noise_removal_enabled: true,
+                noise_removal_strength: 0.85,
+                room_echo_removal_enabled: true,
+                room_echo_removal_strength: 0.6,
+                studio_voice_enabled: false,
+                studio_voice_profile: "default".to_string(),
+                noise_gate_enabled: true,
+                noise_gate_db: -46.0,
+                auto_gain_enabled: true,
+                auto_gain_target_db: -16.0,
+            },
+        ),
+        (
+            "studio_voice",
+            AudioProcessConfig {
+                highpass_enabled: true,
+                highpass_hz: 85.0,
+                noise_removal_enabled: false,
+                noise_removal_strength: 0.85,
+                room_echo_removal_enabled: false,
+                room_echo_removal_strength: 0.5,
+                studio_voice_enabled: true,
+                studio_voice_profile: "warm".to_string(),
+                noise_gate_enabled: true,
+                noise_gate_db: -46.0,
+                auto_gain_enabled: true,
+                auto_gain_target_db: -16.0,
+            },
+        ),
+    ];
+
+    let mut workloads = serde_json::Map::new();
+    let mut backend_name = "nnnoiseless";
+
+    for (wname, cfg) in &specs {
+        let mut proc = AudioProcessor::new(SAMPLE_RATE);
+        backend_name = proc.backend_name;
+        for i in 0..20 {
+            let chunk = ring[i % ring.len()];
+            std::hint::black_box(proc.process_pcm16(chunk, cfg));
+        }
+        let mut lats_us = Vec::with_capacity(frames);
+        let wall_start = Instant::now();
+        for i in 0..frames {
+            let chunk = ring[i % ring.len()];
+            let t0 = Instant::now();
+            let out = proc.process_pcm16(chunk, cfg);
+            std::hint::black_box(&out);
+            lats_us.push(t0.elapsed().as_secs_f64() * 1_000_000.0);
+        }
+        let wall_sec = wall_start.elapsed().as_secs_f64();
+        let rtf = wall_sec / audio_sec.max(1e-9);
+        let misses_2ms = lats_us.iter().filter(|&&v| v > 2000.0).count();
+        let misses_10ms = lats_us.iter().filter(|&&v| v > 10_000.0).count();
+
+        workloads.insert(
+            (*wname).to_string(),
+            json!({
+                "frames": frames,
+                "audio_sec": (audio_sec * 1000.0).round() / 1000.0,
+                "wall_ms": (wall_sec * 1000.0 * 1000.0).round() / 1000.0,
+                "rtf": (rtf * 1_000_000.0).round() / 1_000_000.0,
+                "single_core_cpu_pct": (rtf * 100.0 * 1000.0).round() / 1000.0,
+                "budget_misses_2ms": misses_2ms,
+                "budget_misses_10ms": misses_10ms,
+                "latency_us": summarize_latency_us_map(lats_us),
+            }),
+        );
+    }
+
+    let pcm_raw = run_pcm_bench(frames);
+    let pcm_lat = &pcm_raw["latency"];
+    let pcm_primitive = json!({
+        "status": "ok",
+        "frames": pcm_raw["frames"],
+        "audio_sec": pcm_raw["audio_sec"],
+        "wall_ms": pcm_raw["wall_ms"],
+        "rtf": pcm_raw["rtf"],
+        "latency_us": {
+            "count": pcm_lat["count"],
+            "min": pcm_lat["min_us"],
+            "mean": pcm_lat["mean_us"],
+            "p50": pcm_lat["p50_us"],
+            "p95": pcm_lat["p95_us"],
+            "p99": pcm_lat["p99_us"],
+            "p999": pcm_lat["p999_us"],
+            "max": pcm_lat["max_us"],
+        }
+    });
+
+    json!({
+        "status": "ok",
+        "backend": backend_name,
+        "rss_kb": read_self_rss_kb(),
+        "workloads": workloads,
+        "pcm_primitive": pcm_primitive,
     })
 }
 
@@ -273,7 +473,7 @@ fn run_reliability_checks() -> Value {
         .count();
     json!({
         "status": "ok",
-        "phase": "R0",
+        "phase": "R1",
         "passed": passed,
         "total": checks.len(),
         "checks": checks,
@@ -289,6 +489,15 @@ fn parse_usize_flag(args: &[String], flag: &str, default: usize) -> usize {
         }
     }
     default
+}
+
+fn parse_str_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    for pair in args.windows(2) {
+        if pair[0] == flag {
+            return Some(pair[1].as_str());
+        }
+    }
+    None
 }
 
 fn dispatch(args: &[String]) -> Result<String, String> {
@@ -310,10 +519,18 @@ fn dispatch(args: &[String]) -> Result<String, String> {
                 run_pcm_bench(frames)
             }
             "reliability" => run_reliability_checks(),
-            "audio-file" | "audio-loop" => json!({
-                "status": "pending_phase_r1",
-                "reason": "Pure-Rust AudioProcessor DSP lands in Phase R1"
-            }),
+            "audio-file" => {
+                let in_p = parse_str_flag(rest, "--in")
+                    .ok_or_else(|| "audio-file requires --in <wav>".to_string())?;
+                let out_p = parse_str_flag(rest, "--out")
+                    .ok_or_else(|| "audio-file requires --out <wav>".to_string())?;
+                let cfg = parse_str_flag(rest, "--config").unwrap_or("{}");
+                run_audio_file_bench(in_p, out_p, cfg)?
+            }
+            "audio-loop" => {
+                let frames = parse_usize_flag(rest, "--frames", 2000);
+                run_audio_loop_bench(frames)
+            }
             "video-frames" => json!({
                 "status": "pending_phase_r3",
                 "reason": "Native Rust camera worker lands in Phase R3"
@@ -347,18 +564,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bench_capabilities_reports_r0_contract() {
+    fn bench_capabilities_reports_r1_contract() {
         let out = dispatch(&["bench".to_string(), "capabilities".to_string()]).unwrap();
         let val: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(val["target"], "rust");
+        assert_eq!(val["phase"], "R1");
         assert_eq!(val["capabilities"]["config_bench"], true);
         assert_eq!(val["capabilities"]["pcm_bench"], true);
         assert_eq!(val["capabilities"]["reliability_core"], true);
-        assert_eq!(val["pending_phases"]["audio_quality"], "pending_phase_r1");
+        assert_eq!(val["capabilities"]["audio_dsp"], true);
+        assert_eq!(val["pending_phases"]["memory"], "pending_phase_r2");
     }
 
     #[test]
-    fn bench_config_and_pcm_and_reliability_succeed() {
+    fn bench_config_pcm_audio_loop_and_reliability_succeed() {
         let cfg = run_config_bench(25);
         assert_eq!(cfg["status"], "ok");
         assert_eq!(cfg["iterations"], 25);
@@ -367,6 +586,11 @@ mod tests {
         let pcm = run_pcm_bench(20);
         assert_eq!(pcm["status"], "ok");
         assert_eq!(pcm["frames"], 20);
+
+        let aloop = run_audio_loop_bench(30);
+        assert_eq!(aloop["status"], "ok");
+        assert_eq!(aloop["backend"], "nnnoiseless");
+        assert_eq!(aloop["workloads"]["noise_removal"]["frames"], 30);
 
         let rel = run_reliability_checks();
         assert_eq!(rel["status"], "ok");
