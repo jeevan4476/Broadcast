@@ -20,3 +20,4 @@ daemon.json
 config.json
 .DS_Store
 rust/target/
+bench/results/

@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 nvb-core.workspace = true
+nvb-audio.workspace = true
+serde_json.workspace = true
