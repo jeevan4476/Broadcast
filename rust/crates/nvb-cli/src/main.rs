@@ -1,26 +1,174 @@
-//! NVIDIA Broadcast (Linux) Rust CLI (`nvb-cli`) and unified benchmark driver.
+//! NVIDIA Broadcast (Linux) native Rust CLI (`nvb-cli`) and unified benchmark driver.
 //!
-//! Phase R1 enables full pure-Rust neural audio DSP (`nnnoiseless` + `realfft`)
-//! via `nvb-cli bench audio-file` and `nvb-cli bench audio-loop` alongside the
-//! Phase R0 `capabilities`, `config-bench`, `pcm-bench`, and `reliability` commands.
+//! Drop-in `clap` replacement for `nv-broadcast` (`doctor`, `status`, `devices`,
+//! `effects`, `mic`, `speaker`, `camera`, `serve`, and `bench`).
 
 use std::env;
 use std::f64::consts::PI;
 use std::fs;
-use std::path::Path;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use clap::{Parser, Subcommand};
 use nvb_audio::{
     build_isolated_pw_cat_args, compute_rms_db, f32_to_pcm16, generate_sample_clip,
     is_pw_link_active, parse_pw_links, pcm16_to_f32, read_wav_mono16, write_wav_mono16,
-    AudioProcessConfig, AudioProcessor, PhysicalDevice, PwCatMode, RoutingError,
-    DEFAULT_LATENCY_MS, RNNOISE_FRAME_SAMPLES, SAMPLE_RATE,
+    AudioProcessConfig, AudioProcessor, PhysicalDevice, PipeWireVirtualManager, PwCatMode,
+    RoutingError, DEFAULT_LATENCY_MS, RNNOISE_FRAME_SAMPLES, SAMPLE_RATE,
 };
 use nvb_core::camera_state::CameraState;
-use nvb_core::config::BroadcastConfig;
+use nvb_core::config::{clamp_float, BroadcastConfig, INCOMPATIBLE_GROUPS};
+use nvb_core::devices::build_devices_payload;
+use nvb_core::doctor::{format_doctor_text, run_doctor};
 use nvb_core::{APP_NAME, APP_VERSION};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+
+const CONFIG_ORACLE_JSON: &str = include_str!("../../../fixtures/config_oracle.json");
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "nv-broadcast",
+    version = APP_VERSION,
+    about = "NVIDIA Broadcast for Linux — PipeWire Neural Audio & GPU V4L2 Camera Suite (Rust)"
+)]
+struct Cli {
+    /// Path to config.json
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Emit machine-readable JSON output
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Inspect GPU, PipeWire, V4L2 camera, v4l2loopback, and neural AI backends
+    Doctor,
+    /// Show current configuration, effect state, and virtual devices
+    Status,
+    /// List microphones, speakers, and V4L2 cameras
+    Devices {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Describe all supported NVIDIA Broadcast effect IDs and parameters
+    Effects,
+    /// Configure microphone device and effects
+    Mic {
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        backend: Option<String>,
+        #[arg(long)]
+        noise_removal: Option<bool>,
+        #[arg(long)]
+        noise_strength: Option<f64>,
+        #[arg(long)]
+        echo_removal: Option<bool>,
+        #[arg(long)]
+        echo_strength: Option<f64>,
+        #[arg(long)]
+        studio_voice: Option<bool>,
+        #[arg(long)]
+        mic_profile: Option<String>,
+    },
+    /// Configure speaker output and incoming audio effects
+    Speaker {
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        noise_removal: Option<bool>,
+        #[arg(long)]
+        noise_strength: Option<f64>,
+        #[arg(long)]
+        echo_removal: Option<bool>,
+        #[arg(long)]
+        echo_strength: Option<f64>,
+    },
+    /// Configure webcam, resolution, and video effects
+    Camera {
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        output_device: Option<String>,
+        #[arg(long)]
+        on_demand: Option<bool>,
+        #[arg(long)]
+        idle_timeout: Option<f64>,
+        #[arg(long)]
+        blur: Option<bool>,
+        #[arg(long)]
+        blur_strength: Option<f64>,
+        #[arg(long)]
+        blur_mode: Option<String>,
+        #[arg(long)]
+        replace: Option<bool>,
+        #[arg(long)]
+        remove: Option<bool>,
+    },
+    /// Start the local HTTP/SSE/MJPEG daemon (nvb-daemon)
+    Serve {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        autostart: bool,
+        #[arg(long)]
+        daemon_file: bool,
+    },
+    /// Internal benchmark driver used by `bench/run_suite.py`
+    Bench {
+        #[command(subcommand)]
+        sub: BenchCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BenchCmd {
+    Capabilities,
+    ConfigBench {
+        #[arg(long, default_value_t = 1000)]
+        iterations: usize,
+    },
+    PcmBench {
+        #[arg(long, default_value_t = 2000)]
+        frames: usize,
+    },
+    AudioFile {
+        #[arg(long = "in")]
+        in_path: String,
+        #[arg(long = "out")]
+        out_path: String,
+        #[arg(long, default_value = "{}")]
+        config: String,
+    },
+    AudioLoop {
+        #[arg(long, default_value_t = 2000)]
+        frames: usize,
+    },
+    Reliability,
+}
+
+fn default_config_path() -> PathBuf {
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            home.join(".config")
+        });
+    base.join("nv-broadcast").join("config.json")
+}
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
@@ -94,22 +242,19 @@ fn capabilities_payload() -> Value {
         "target": "rust",
         "app": APP_NAME,
         "version": APP_VERSION,
-        "phase": "R1",
+        "phase": "R2",
         "audio_backend": "nnnoiseless",
         "capabilities": {
             "config_bench": true,
             "pcm_bench": true,
             "reliability_core": true,
             "audio_dsp": true,
-            "daemon_http": false,
-            "cli_full": false,
+            "daemon_http": true,
+            "cli_full": true,
             "video_pipeline": false
         },
         "pending_phases": {
-            "memory": "pending_phase_r2",
-            "video": "pending_phase_r3",
-            "api_cli": "pending_phase_r2",
-            "system_impact": "pending_phase_r2"
+            "video": "pending_phase_r3"
         }
     })
 }
@@ -302,7 +447,7 @@ fn run_audio_loop_bench(frames: usize) -> Value {
         ),
     ];
 
-    let mut workloads = serde_json::Map::new();
+    let mut workloads = Map::new();
     let mut backend_name = "nnnoiseless";
 
     for (wname, cfg) in &specs {
@@ -373,7 +518,6 @@ fn run_audio_loop_bench(frames: usize) -> Value {
 fn run_reliability_checks() -> Value {
     let mut checks = Vec::new();
 
-    // 1. Feedback loop prevention via typed PhysicalDevice
     let virtual_names = [
         "nv_broadcast_mic",
         "nv_broadcast_mic_bus",
@@ -395,7 +539,6 @@ fn run_reliability_checks() -> Value {
         "detail": "PhysicalDevice newtype rejects all Broadcast virtual nodes and empty names"
     }));
 
-    // 2. Isolated pw-cat stream properties
     let rec_args = build_isolated_pw_cat_args(
         PwCatMode::Record,
         "nv_broadcast_mic_capture",
@@ -421,7 +564,6 @@ fn run_reliability_checks() -> Value {
         "detail": "pw-cat args set node.autoconnect=false and node.dont-reconnect=true"
     }));
 
-    // 3. Dropped link detection via parse_pw_links + is_pw_link_active
     let links_ok = parse_pw_links(
         "alsa_input.usb:capture_FL\n  |-> nv_broadcast_mic_capture:input_FL\n",
     );
@@ -434,7 +576,6 @@ fn run_reliability_checks() -> Value {
         "detail": "parse_pw_links detects missing active edge"
     }));
 
-    // 4. Corrupt / truncated config.json resilience
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -452,7 +593,6 @@ fn run_reliability_checks() -> Value {
         "detail": "BroadcastConfig::load_from_path recovers cleanly to sanitized defaults"
     }));
 
-    // 5. Camera on-demand standby state machine invariants
     let s1 = CameraState::Off.enable_on_demand();
     let s2 = s1.on_consumers_observed(1, false, true);
     let s3 = s2.on_consumers_observed(0, true, true);
@@ -473,88 +613,252 @@ fn run_reliability_checks() -> Value {
         .count();
     json!({
         "status": "ok",
-        "phase": "R1",
+        "phase": "R2",
         "passed": passed,
         "total": checks.len(),
         "checks": checks,
     })
 }
 
-fn parse_usize_flag(args: &[String], flag: &str, default: usize) -> usize {
-    for pair in args.windows(2) {
-        if pair[0] == flag {
-            if let Ok(val) = pair[1].parse::<usize>() {
-                return val.max(1);
-            }
-        }
-    }
-    default
+fn emit_json(val: &Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(val).unwrap_or_else(|_| "{}".to_string())
+    );
 }
 
-fn parse_str_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    for pair in args.windows(2) {
-        if pair[0] == flag {
-            return Some(pair[1].as_str());
+fn find_sibling_daemon() -> PathBuf {
+    if let Ok(exe) = env::current_exe() {
+        let sibling = exe.with_file_name("nvb-daemon");
+        if sibling.is_file() {
+            return sibling;
         }
     }
-    None
-}
-
-fn dispatch(args: &[String]) -> Result<String, String> {
-    if args.is_empty() || args[0] == "--version" || args[0] == "-V" {
-        return Ok(format!("{APP_NAME} nvb-cli {APP_VERSION}"));
-    }
-
-    if args[0] == "bench" {
-        let sub = args.get(1).map(String::as_str).unwrap_or("capabilities");
-        let rest = if args.len() > 2 { &args[2..] } else { &[] };
-        let payload = match sub {
-            "capabilities" => capabilities_payload(),
-            "config-bench" => {
-                let iters = parse_usize_flag(rest, "--iterations", 1000);
-                run_config_bench(iters)
-            }
-            "pcm-bench" => {
-                let frames = parse_usize_flag(rest, "--frames", 2000);
-                run_pcm_bench(frames)
-            }
-            "reliability" => run_reliability_checks(),
-            "audio-file" => {
-                let in_p = parse_str_flag(rest, "--in")
-                    .ok_or_else(|| "audio-file requires --in <wav>".to_string())?;
-                let out_p = parse_str_flag(rest, "--out")
-                    .ok_or_else(|| "audio-file requires --out <wav>".to_string())?;
-                let cfg = parse_str_flag(rest, "--config").unwrap_or("{}");
-                run_audio_file_bench(in_p, out_p, cfg)?
-            }
-            "audio-loop" => {
-                let frames = parse_usize_flag(rest, "--frames", 2000);
-                run_audio_loop_bench(frames)
-            }
-            "video-frames" => json!({
-                "status": "pending_phase_r3",
-                "reason": "Native Rust camera worker lands in Phase R3"
-            }),
-            other => {
-                return Err(format!("unknown bench subcommand: {other}"));
-            }
-        };
-        return serde_json::to_string_pretty(&payload).map_err(|e| e.to_string());
-    }
-
-    Ok(format!("{APP_NAME} nvb-cli {APP_VERSION}"))
+    PathBuf::from("nvb-daemon")
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
-    match dispatch(&args) {
-        Ok(out) => {
-            println!("{out}");
+    let cli = Cli::parse();
+    let cfg_path = cli.config.unwrap_or_else(default_config_path);
+
+    let Some(cmd) = cli.command else {
+        println!("{APP_NAME} nvb-cli {APP_VERSION}");
+        return ExitCode::SUCCESS;
+    };
+
+    match cmd {
+        Commands::Doctor => {
+            let report = run_doctor();
+            if cli.json {
+                emit_json(&report);
+            } else {
+                println!("{}", format_doctor_text(&report));
+            }
             ExitCode::SUCCESS
         }
-        Err(err) => {
-            eprintln!("error: {err}");
-            ExitCode::FAILURE
+        Commands::Status => {
+            let cfg = BroadcastConfig::load_from_path(&cfg_path);
+            let payload = json!({
+                "version": APP_VERSION,
+                "engine": "rust",
+                "config_path": cfg_path.to_string_lossy(),
+                "config": cfg,
+                "broadcast_state": cfg.get_broadcast_state(),
+                "virtual_nodes": PipeWireVirtualManager::find_existing_virtual_nodes(),
+            });
+            emit_json(&payload);
+            ExitCode::SUCCESS
+        }
+        Commands::Devices { all } => {
+            let payload = build_devices_payload(all);
+            emit_json(&serde_json::to_value(payload).unwrap_or_else(|_| json!({})));
+            ExitCode::SUCCESS
+        }
+        Commands::Effects => {
+            let catalog = serde_json::from_str::<Value>(CONFIG_ORACLE_JSON)
+                .ok()
+                .and_then(|v| v.get("effect_catalog").cloned())
+                .unwrap_or_else(|| json!({}));
+            let payload = json!({
+                "effects": catalog,
+                "incompatible_groups": INCOMPATIBLE_GROUPS,
+            });
+            emit_json(&payload);
+            ExitCode::SUCCESS
+        }
+        Commands::Mic {
+            device,
+            backend,
+            noise_removal,
+            noise_strength,
+            echo_removal,
+            echo_strength,
+            studio_voice,
+            mic_profile,
+        } => {
+            let mut cfg = BroadcastConfig::load_from_path(&cfg_path);
+            if let Some(d) = device {
+                cfg.microphone.device = d;
+            }
+            if let Some(b) = backend {
+                cfg.audio_backend = b;
+            }
+            if noise_removal.is_some() || noise_strength.is_some() {
+                let mut p = Map::new();
+                if let Some(s) = noise_strength {
+                    p.insert("strength".to_string(), json!(s));
+                }
+                let _ = cfg.set_effect("noise_removal", noise_removal, Some(&p), true);
+            }
+            if echo_removal.is_some() || echo_strength.is_some() {
+                let mut p = Map::new();
+                if let Some(s) = echo_strength {
+                    p.insert("strength".to_string(), json!(s));
+                }
+                let _ = cfg.set_effect("room_echo_removal", echo_removal, Some(&p), true);
+            }
+            if studio_voice.is_some() || mic_profile.is_some() {
+                let mut p = Map::new();
+                if let Some(mp) = mic_profile {
+                    p.insert("micProfile".to_string(), json!(mp));
+                }
+                let _ = cfg.set_effect("studio_voice", studio_voice, Some(&p), true);
+            }
+            let _ = cfg.save_to_path(&cfg_path);
+            emit_json(&json!({"ok": true, "microphone": cfg.microphone}));
+            ExitCode::SUCCESS
+        }
+        Commands::Speaker {
+            device,
+            noise_removal,
+            noise_strength,
+            echo_removal,
+            echo_strength,
+        } => {
+            let mut cfg = BroadcastConfig::load_from_path(&cfg_path);
+            if let Some(d) = device {
+                cfg.speaker.device = d;
+            }
+            if noise_removal.is_some() || noise_strength.is_some() {
+                let mut p = Map::new();
+                if let Some(s) = noise_strength {
+                    p.insert("strength".to_string(), json!(s));
+                }
+                let _ = cfg.set_effect("speaker_noise_removal", noise_removal, Some(&p), true);
+            }
+            if echo_removal.is_some() || echo_strength.is_some() {
+                let mut p = Map::new();
+                if let Some(s) = echo_strength {
+                    p.insert("strength".to_string(), json!(s));
+                }
+                let _ = cfg.set_effect("speaker_echo_removal", echo_removal, Some(&p), true);
+            }
+            let _ = cfg.save_to_path(&cfg_path);
+            emit_json(&json!({"ok": true, "speaker": cfg.speaker}));
+            ExitCode::SUCCESS
+        }
+        Commands::Camera {
+            device,
+            output_device,
+            on_demand,
+            idle_timeout,
+            blur,
+            blur_strength,
+            blur_mode,
+            replace,
+            remove,
+        } => {
+            let mut cfg = BroadcastConfig::load_from_path(&cfg_path);
+            if let Some(d) = device {
+                cfg.camera.device = d;
+            }
+            if let Some(o) = output_device {
+                cfg.camera.output_device = o;
+            }
+            if let Some(od) = on_demand {
+                cfg.camera.on_demand = od;
+            }
+            if let Some(t) = idle_timeout {
+                cfg.camera.idle_timeout_sec = clamp_float(t, 0.5, 60.0, 3.0);
+            }
+            if blur.is_some() || blur_strength.is_some() || blur_mode.is_some() {
+                let mut p = Map::new();
+                if let Some(s) = blur_strength {
+                    p.insert("strength".to_string(), json!(s));
+                }
+                if let Some(m) = blur_mode {
+                    p.insert("mode".to_string(), json!(m));
+                }
+                let _ = cfg.set_effect("background_blur", blur, Some(&p), true);
+            }
+            if let Some(r) = replace {
+                let _ = cfg.set_effect("background_replace", Some(r), None, true);
+            }
+            if let Some(r) = remove {
+                let _ = cfg.set_effect("background_remove", Some(r), None, true);
+            }
+            let _ = cfg.save_to_path(&cfg_path);
+            emit_json(&json!({"ok": true, "camera": cfg.camera}));
+            ExitCode::SUCCESS
+        }
+        Commands::Serve {
+            host,
+            port,
+            token,
+            autostart,
+            daemon_file,
+        } => {
+            let daemon = find_sibling_daemon();
+            let mut c = Command::new(daemon);
+            c.args([
+                "--host",
+                &host,
+                "--port",
+                &port.to_string(),
+                "--config",
+                &cfg_path.to_string_lossy(),
+            ]);
+            if let Some(tok) = token {
+                c.args(["--token", &tok]);
+            }
+            if autostart {
+                c.arg("--autostart");
+            }
+            if daemon_file {
+                c.arg("--daemon-file");
+            }
+            match c.status() {
+                Ok(st) if st.success() => ExitCode::SUCCESS,
+                Ok(st) => ExitCode::from(st.code().unwrap_or(1) as u8),
+                Err(e) => {
+                    eprintln!("failed to launch nvb-daemon: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Commands::Bench { sub } => {
+            let res = match sub {
+                BenchCmd::Capabilities => Ok(capabilities_payload()),
+                BenchCmd::ConfigBench { iterations } => Ok(run_config_bench(iterations.max(1))),
+                BenchCmd::PcmBench { frames } => Ok(run_pcm_bench(frames.max(1))),
+                BenchCmd::AudioFile {
+                    in_path,
+                    out_path,
+                    config,
+                } => run_audio_file_bench(&in_path, &out_path, &config),
+                BenchCmd::AudioLoop { frames } => Ok(run_audio_loop_bench(frames.max(1))),
+                BenchCmd::Reliability => Ok(run_reliability_checks()),
+            };
+            match res {
+                Ok(val) => {
+                    emit_json(&val);
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    ExitCode::FAILURE
+                }
+            }
         }
     }
 }
@@ -564,16 +868,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bench_capabilities_reports_r1_contract() {
-        let out = dispatch(&["bench".to_string(), "capabilities".to_string()]).unwrap();
-        let val: Value = serde_json::from_str(&out).unwrap();
+    fn bench_capabilities_reports_r2_contract() {
+        let val = capabilities_payload();
         assert_eq!(val["target"], "rust");
-        assert_eq!(val["phase"], "R1");
         assert_eq!(val["capabilities"]["config_bench"], true);
         assert_eq!(val["capabilities"]["pcm_bench"], true);
         assert_eq!(val["capabilities"]["reliability_core"], true);
         assert_eq!(val["capabilities"]["audio_dsp"], true);
-        assert_eq!(val["pending_phases"]["memory"], "pending_phase_r2");
+        assert_eq!(val["capabilities"]["daemon_http"], true);
+        assert_eq!(val["capabilities"]["cli_full"], true);
+        assert_eq!(val["pending_phases"]["video"], "pending_phase_r3");
     }
 
     #[test]

@@ -1,9 +1,11 @@
-//! Core configuration, typed invariants, state machines, and wire contracts
-//! for NVIDIA Broadcast (Linux).
+//! Core configuration, typed invariants, state machines, device probing,
+//! and wire contracts for NVIDIA Broadcast (Linux).
 
 pub mod api_contract;
 pub mod camera_state;
 pub mod config;
+pub mod devices;
+pub mod doctor;
 pub mod loopback_monitor;
 pub mod models;
 pub mod routing;

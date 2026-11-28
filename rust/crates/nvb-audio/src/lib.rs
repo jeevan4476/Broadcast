@@ -1,6 +1,7 @@
 //! Audio DSP utilities, pure-Rust neural audio processor, and PipeWire anti-loop routing contracts.
 
 pub mod dsp;
+pub mod engine;
 
 use std::collections::HashMap;
 
@@ -8,6 +9,7 @@ pub use dsp::{
     build_ffmpeg_audio_filter, compute_waveform_peaks, generate_sample_clip, read_wav_mono16,
     write_wav_mono16, AudioProcessConfig, AudioProcessor,
 };
+pub use engine::{AudioEngine, PipeWireVirtualManager};
 
 pub use nvb_core::api_contract::AudioMeterReading;
 pub use nvb_core::routing::{

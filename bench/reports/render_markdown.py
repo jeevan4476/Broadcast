@@ -308,30 +308,53 @@ def render_markdown(report: dict[str, Any]) -> str:
             cv = (p5.get("cli_cold_start_ms") or {}).get(cname)
             rv = (r5.get("cli_cold_start_ms") or {}).get(cname)
             if cv:
-                r_txt = _fmt_num(rv["p50"], "ms", 1) if rv else "`pending_phase_r2`"
+                r_txt = f"{rv['p50']:.1f} / {rv['p95']:.1f} ms" if rv else "`pending_phase_r2`"
+                sp_c = f"**{cv['p50'] / max(rv['p50'], 1e-6):.1f}x faster**" if rv else "—"
                 lines.append(
                     f"| CLI cold start `{cname}` (`p50` / `p95`) | "
-                    f"{cv['p50']:.1f} / {cv['p95']:.1f} ms | {r_txt} | — |"
+                    f"{cv['p50']:.1f} / {cv['p95']:.1f} ms | {r_txt} | {sp_c} |"
                 )
 
         if p5.get("daemon_boot_ms") is not None:
-            r_boot = _fmt_num(r5.get("daemon_boot_ms"), "ms", 1) if r5.get("daemon_boot_ms") is not None else "`pending_phase_r2`"
-            lines.append(f"| Daemon cold boot to `READY` | {p5['daemon_boot_ms']:.1f} ms | {r_boot} | — |")
+            rb = r5.get("daemon_boot_ms")
+            r_boot = _fmt_num(rb, "ms", 1) if rb is not None else "`pending_phase_r2`"
+            sp_b = f"**{p5['daemon_boot_ms'] / max(rb, 1e-6):.1f}x faster**" if rb else "—"
+            lines.append(f"| Daemon cold boot to `READY` | {p5['daemon_boot_ms']:.1f} ms | {r_boot} | {sp_b} |")
 
         for ep, ep_data in (p5.get("http_endpoints") or {}).items():
             lm = ep_data["latency_ms"]
             r_ep = (r5.get("http_endpoints") or {}).get(ep)
-            r_txt = f"{r_ep['latency_ms']['p95']:.2f} ms ({r_ep['req_per_sec']:.0f} req/s)" if r_ep else "`pending_phase_r2`"
+            if r_ep:
+                rlm = r_ep["latency_ms"]
+                r_txt = f"{rlm['p50']:.2f} / {rlm['p95']:.2f} ms ({r_ep['req_per_sec']:.0f} req/s)"
+                sp_e = f"**{lm['p95'] / max(rlm['p95'], 1e-6):.1f}x lower p95**"
+            else:
+                r_txt = "`pending_phase_r2`"
+                sp_e = "—"
             lines.append(
                 f"| HTTP `{ep}` (`p50` / `p95` ms, req/s) | "
-                f"{lm['p50']:.2f} / {lm['p95']:.2f} ms ({ep_data['req_per_sec']:.0f} req/s) | {r_txt} | — |"
+                f"{lm['p50']:.2f} / {lm['p95']:.2f} ms ({ep_data['req_per_sec']:.0f} req/s) | {r_txt} | {sp_e} |"
             )
 
         for skey, sdata in (p5.get("sse_fanout") or {}).items():
+            rs_sse = (r5.get("sse_fanout") or {}).get(skey)
+            r_txt = (
+                f"{rs_sse['cpu_ms_per_sec']:.1f} CPU-ms/s, {rs_sse['total_ctxt_per_sec']:.1f} ctxt/s, {rs_sse['rss_mb']:.1f} MB"
+                if rs_sse
+                else "`pending_phase_r2`"
+            )
             lines.append(
                 f"| SSE `/api/events` ({skey}) | "
-                f"{sdata['cpu_ms_per_sec']:.1f} CPU-ms/s, {sdata['total_ctxt_per_sec']:.1f} ctxt/s, {sdata['rss_mb']:.1f} MB | `pending_phase_r2` | — |"
+                f"{sdata['cpu_ms_per_sec']:.1f} CPU-ms/s, {sdata['total_ctxt_per_sec']:.1f} ctxt/s, {sdata['rss_mb']:.1f} MB | {r_txt} | — |"
             )
+
+        api_par = (report.get("parity") or {}).get("api_contract")
+        if api_par is not None:
+            lines.append("")
+            if api_par.get("exact_match"):
+                lines.append("> **Differential API Contract Parity (Python vs Rust):** **EXACT MATCH** (status codes, auth rejection, JSON keys, and effect conflict results identical).")
+            else:
+                lines.append(f"> **Differential API Contract Parity (Python vs Rust):** DIFFS FOUND: `{api_par.get('diffs')}`")
         lines.append("")
 
     # Suite 6: System, Power & Idle Wakeup Overhead
