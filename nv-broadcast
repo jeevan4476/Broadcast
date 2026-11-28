@@ -5,14 +5,27 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-# Optional Strangler-Fig selector: NVB_ENGINE=rust routes CLI/daemon to native Rust binaries
-if [[ "${NVB_ENGINE:-python}" == "rust" ]]; then
+# Strangler-Fig engine selector: default to native Rust binaries when built,
+# with instant one-variable rollback (`NVB_ENGINE=python`) and automatic Python
+# routing for GUI and Python-only utility subcommands.
+if [[ "${NVB_ENGINE:-rust}" == "rust" ]]; then
     RUST_CLI="${SCRIPT_DIR}/rust/target/release/nvb-cli"
     if [[ ! -x "${RUST_CLI}" ]]; then
         RUST_CLI="${SCRIPT_DIR}/rust/target/debug/nvb-cli"
     fi
-    if [[ -x "${RUST_CLI}" && "${1:-}" != "gui" ]]; then
-        exec "${RUST_CLI}" "$@"
+    if [[ -x "${RUST_CLI}" ]]; then
+        use_rust=true
+        for arg in "$@"; do
+            case "${arg}" in
+                gui|install-filter|install-deps|test-mic|v4l2|stop)
+                    use_rust=false
+                    break
+                    ;;
+            esac
+        done
+        if [[ "${use_rust}" == "true" ]]; then
+            exec "${RUST_CLI}" "$@"
+        fi
     fi
 fi
 

@@ -14,8 +14,8 @@ use clap::{Parser, Subcommand};
 use nvb_audio::{
     build_isolated_pw_cat_args, compute_rms_db, f32_to_pcm16, generate_sample_clip,
     is_pw_link_active, parse_pw_links, pcm16_to_f32, read_wav_mono16, write_wav_mono16,
-    AudioProcessConfig, AudioProcessor, PhysicalDevice, PipeWireVirtualManager, PwCatMode,
-    RoutingError, DEFAULT_LATENCY_MS, RNNOISE_FRAME_SAMPLES, SAMPLE_RATE,
+    AudioProcessConfig, AudioProcessor, FileProcessor, PhysicalDevice, PipeWireVirtualManager,
+    PwCatMode, RoutingError, DEFAULT_LATENCY_MS, RNNOISE_FRAME_SAMPLES, SAMPLE_RATE,
 };
 use nvb_core::camera_state::CameraState;
 use nvb_core::config::{clamp_float, BroadcastConfig, INCOMPATIBLE_GROUPS};
@@ -123,6 +123,20 @@ enum Commands {
         autostart: bool,
         #[arg(long)]
         daemon_file: bool,
+    },
+    /// Enhance an audio or video file (including screen recordings) with Broadcast effects
+    ProcessFile {
+        /// Input audio or video file path
+        input: String,
+        /// Output file path (defaults to ~/Videos or ~/Music/NVIDIA Broadcast/*_broadcast.*)
+        #[arg(short = 'o', long)]
+        output: Option<String>,
+        /// Skip audio processing
+        #[arg(long)]
+        no_audio: bool,
+        /// Skip video processing (lossless video stream-copy)
+        #[arg(long)]
+        no_video: bool,
     },
     /// Internal benchmark driver used by `bench/run_suite.py`
     Bench {
@@ -242,7 +256,7 @@ fn capabilities_payload() -> Value {
         "target": "rust",
         "app": APP_NAME,
         "version": APP_VERSION,
-        "phase": "R3",
+        "phase": "R4",
         "audio_backend": "nnnoiseless",
         "capabilities": {
             "config_bench": true,
@@ -251,7 +265,8 @@ fn capabilities_payload() -> Value {
             "audio_dsp": true,
             "daemon_http": true,
             "cli_full": true,
-            "video_pipeline": true
+            "video_pipeline": true,
+            "file_processor": true
         },
         "pending_phases": {}
     })
@@ -834,6 +849,26 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Commands::ProcessFile {
+            input,
+            output,
+            no_audio,
+            no_video,
+        } => {
+            let cfg = BroadcastConfig::load_from_path(&cfg_path);
+            let fp = FileProcessor::new();
+            let state = fp.process_sync(cfg, &input, output.as_deref(), !no_audio, !no_video);
+            if cli.json {
+                emit_json(&serde_json::to_value(&state).unwrap_or_else(|_| json!({})));
+            } else {
+                println!("[{}] {} -> {}", state.status, state.message, state.output_path);
+            }
+            if state.status == "completed" {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
         Commands::Bench { sub } => {
             let res = match sub {
                 BenchCmd::Capabilities => Ok(capabilities_payload()),
@@ -866,9 +901,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bench_capabilities_reports_r3_contract() {
+    fn bench_capabilities_reports_r4_contract() {
         let val = capabilities_payload();
         assert_eq!(val["target"], "rust");
+        assert_eq!(val["phase"], "R4");
         assert_eq!(val["capabilities"]["config_bench"], true);
         assert_eq!(val["capabilities"]["pcm_bench"], true);
         assert_eq!(val["capabilities"]["reliability_core"], true);
@@ -876,6 +912,7 @@ mod tests {
         assert_eq!(val["capabilities"]["daemon_http"], true);
         assert_eq!(val["capabilities"]["cli_full"], true);
         assert_eq!(val["capabilities"]["video_pipeline"], true);
+        assert_eq!(val["capabilities"]["file_processor"], true);
     }
 
     #[test]

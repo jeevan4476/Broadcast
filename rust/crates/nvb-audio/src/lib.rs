@@ -2,6 +2,7 @@
 
 pub mod dsp;
 pub mod engine;
+pub mod file_processor;
 
 use std::collections::HashMap;
 
@@ -10,6 +11,9 @@ pub use dsp::{
     write_wav_mono16, AudioProcessConfig, AudioProcessor,
 };
 pub use engine::{AudioEngine, PipeWireVirtualManager};
+pub use file_processor::{
+    has_enabled_video_effects, FileJobState, FileProcessor, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS,
+};
 
 pub use nvb_core::api_contract::AudioMeterReading;
 pub use nvb_core::routing::{

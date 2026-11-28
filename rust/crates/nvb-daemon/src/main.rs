@@ -23,7 +23,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use nvb_audio::{AudioEngine, PipeWireVirtualManager};
+use nvb_audio::{AudioEngine, FileProcessor, PipeWireVirtualManager};
 use nvb_core::api_contract::{
     AppInfo, AudioStreamTelemetry, CameraConsumer, CameraTelemetry, DevicesPayload, ErrorResponse,
     FullStatePayload, HealthResponse, PostEffectResponse, TelemetrySnapshot, AUTH_HEADER,
@@ -313,6 +313,7 @@ struct AppState {
     incompatible_groups: Vec<Vec<String>>,
     audio: AudioEngine,
     camera: Mutex<CameraController>,
+    files: FileProcessor,
     cache: RwLock<CachedSystemState>,
 }
 
@@ -334,6 +335,7 @@ impl AppState {
             incompatible_groups,
             audio,
             camera: Mutex::new(CameraController::default()),
+            files: FileProcessor::new(),
             cache: RwLock::new(CachedSystemState::default()),
         })
     }
@@ -414,7 +416,7 @@ impl AppState {
             camera: cam_tel,
             gpu,
             device_sig: sig,
-            file_job: json!({"running": false, "progress": 0.0, "status": "idle"}),
+            file_job: serde_json::to_value(self.files.get_state()).unwrap_or_else(|_| json!({})),
         }
     }
 
@@ -542,7 +544,51 @@ async fn get_files_state(
     if !st.check_auth(&headers, &q) {
         return unauthorized();
     }
-    Json(json!({"running": false, "progress": 0.0, "status": "idle"})).into_response()
+    Json(st.files.get_state()).into_response()
+}
+
+async fn post_files_start(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !st.check_auth(&headers, &q) {
+        return unauthorized();
+    }
+    let input_path = body
+        .get("input_path")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let output_path = body
+        .get("output_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let apply_audio = body
+        .get("apply_audio")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let apply_video = body
+        .get("apply_video")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let cfg = st.config.read().map(|c| c.clone()).unwrap_or_default();
+    let (ok, msg) = st
+        .files
+        .start_job(cfg, input_path, output_path, apply_audio, apply_video);
+    Json(json!({"ok": ok, "message": msg, "state": st.files.get_state()})).into_response()
+}
+
+async fn post_files_cancel(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !st.check_auth(&headers, &q) {
+        return unauthorized();
+    }
+    st.files.cancel();
+    Json(json!({"ok": true, "state": st.files.get_state()})).into_response()
 }
 
 async fn get_camera_v4l2(
@@ -968,6 +1014,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/camera/start", post(post_camera_start))
         .route("/api/camera/stop", post(post_camera_stop))
         .route("/api/camera/config", post(post_camera_config))
+        .route("/api/files/start", post(post_files_start))
+        .route("/api/files/cancel", post(post_files_cancel))
         .fallback(not_found)
         .with_state(state)
 }
@@ -1109,6 +1157,7 @@ fn main() {
             .with_graceful_shutdown(shutdown_signal())
             .await;
 
+        state.files.cancel();
         state.audio.stop_all();
         if let Ok(mut cam) = state.camera.lock() {
             cam.stop(true);
@@ -1234,6 +1283,37 @@ mod tests {
             body["disabled_conflicts"],
             oracle["post_effect"]["disabled_conflicts"]
         );
+
+        // 6. Offline file endpoints (`/api/files/state`, `/api/files/start`, `/api/files/cancel`)
+        let (code, body) = http_req(
+            addr,
+            &format!("GET /api/files/state HTTP/1.1\r\nHost: localhost\r\nX-NVB-Token: {token}\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert_eq!(body["status"], "idle");
+        assert_eq!(body["active"], false);
+
+        let fpayload = r#"{"input_path":"/nonexistent/clip.mp4","apply_audio":true,"apply_video":false}"#;
+        let (code, body) = http_req(
+            addr,
+            &format!(
+                "POST /api/files/start HTTP/1.1\r\nHost: localhost\r\nX-NVB-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{fpayload}",
+                fpayload.len()
+            ),
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["state"]["status"], "idle");
+
+        let (code, body) = http_req(
+            addr,
+            &format!("POST /api/files/cancel HTTP/1.1\r\nHost: localhost\r\nX-NVB-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert_eq!(body["ok"], true);
 
         server.abort();
         let _ = fs::remove_file(&cfg_path);

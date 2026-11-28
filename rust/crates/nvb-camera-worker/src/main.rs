@@ -68,6 +68,17 @@ enum WorkerCmd {
         #[arg(long, default_value = "auto")]
         backend: String,
     },
+    /// Offline process a local video file through Rust neural effects (`PROGRESS <0..1>` on stdout)
+    ProcessVideo {
+        #[arg(long = "in")]
+        in_path: PathBuf,
+        #[arg(long = "out")]
+        out_path: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, default_value = "auto")]
+        backend: String,
+    },
 }
 
 fn read_self_rss_kb() -> u64 {
@@ -363,6 +374,290 @@ fn run_stream(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct VideoMeta {
+    width: usize,
+    height: usize,
+    fps: f64,
+    total_frames: usize,
+}
+
+fn parse_rate_fraction(s: &str) -> Option<f64> {
+    if let Some((num, den)) = s.split_once('/') {
+        let n: f64 = num.trim().parse().ok()?;
+        let d: f64 = den.trim().parse().ok()?;
+        if d > 0.0 && n > 0.0 {
+            return Some(n / d);
+        }
+    }
+    s.trim().parse::<f64>().ok().filter(|&v| v > 0.0)
+}
+
+fn parse_ffprobe_meta(json_text: &str) -> Result<VideoMeta, String> {
+    let val: Value =
+        serde_json::from_str(json_text).map_err(|e| format!("invalid ffprobe JSON: {e}"))?;
+    let stream = val
+        .get("streams")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .ok_or_else(|| "no video stream found in input".to_string())?;
+    let width = stream
+        .get("width")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "missing video width".to_string())? as usize;
+    let height = stream
+        .get("height")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "missing video height".to_string())? as usize;
+    let fps = stream
+        .get("avg_frame_rate")
+        .and_then(Value::as_str)
+        .and_then(parse_rate_fraction)
+        .or_else(|| {
+            stream
+                .get("r_frame_rate")
+                .and_then(Value::as_str)
+                .and_then(parse_rate_fraction)
+        })
+        .unwrap_or(30.0)
+        .clamp(1.0, 240.0);
+
+    let nb_frames = stream
+        .get("nb_frames")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<usize>().ok())
+        .or_else(|| {
+            stream
+                .get("duration")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|d| (d * fps).round() as usize)
+        })
+        .unwrap_or(1)
+        .max(1);
+
+    Ok(VideoMeta {
+        width,
+        height,
+        fps,
+        total_frames: nb_frames,
+    })
+}
+
+fn probe_video_meta(path: &Path) -> Result<VideoMeta, String> {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,duration",
+            "-of",
+            "json",
+            &path.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("ffprobe failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ffprobe failed for '{}': {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    parse_ffprobe_meta(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn ffmpeg_encoder_list() -> String {
+    let Ok(out) = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn select_video_encoder(allow_nvenc: bool) -> &'static str {
+    let encs = ffmpeg_encoder_list();
+    if allow_nvenc && encs.contains("h264_nvenc") {
+        "h264_nvenc"
+    } else if encs.contains("libx264") {
+        "libx264"
+    } else if encs.contains("libopenh264") {
+        "libopenh264"
+    } else {
+        "mpeg4"
+    }
+}
+
+fn spawn_video_encoder(
+    out_path: &Path,
+    width: usize,
+    height: usize,
+    fps: f64,
+    encoder: &str,
+) -> Result<std::process::Child, String> {
+    let size = format!("{width}x{height}");
+    let fps_str = format!("{fps:.3}");
+    let out_str = out_path.to_string_lossy().into_owned();
+    let mut args = vec![
+        "-nostdin".to_string(),
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-f".to_string(),
+        "rawvideo".to_string(),
+        "-pix_fmt".to_string(),
+        "rgb24".to_string(),
+        "-video_size".to_string(),
+        size,
+        "-framerate".to_string(),
+        fps_str,
+        "-i".to_string(),
+        "-".to_string(),
+    ];
+    match encoder {
+        "h264_nvenc" => args.extend([
+            "-c:v".into(),
+            "h264_nvenc".into(),
+            "-preset".into(),
+            "p4".into(),
+            "-cq".into(),
+            "20".into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            out_str,
+        ]),
+        "libx264" => args.extend([
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            "fast".into(),
+            "-crf".into(),
+            "20".into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            out_str,
+        ]),
+        "libopenh264" => args.extend([
+            "-c:v".into(),
+            "libopenh264".into(),
+            "-b:v".into(),
+            "4M".into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            out_str,
+        ]),
+        _ => args.extend([
+            "-c:v".into(),
+            "mpeg4".into(),
+            "-q:v".into(),
+            "4".into(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            out_str,
+        ]),
+    }
+    Command::new("ffmpeg")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed spawning ffmpeg video encoder ({encoder}): {e}"))
+}
+
+fn run_process_video(
+    in_path: &Path,
+    out_path: &Path,
+    config_path: Option<&Path>,
+    backend: &str,
+) -> Result<(), String> {
+    let meta = probe_video_meta(in_path)?;
+    let mut cam_cfg = if let Some(cp) = config_path {
+        let bc = BroadcastConfig::load_from_path(cp);
+        serde_json::to_value(&bc.camera)
+            .map(|v| CameraEffectsConfig::from_json_value(&v))
+            .unwrap_or_default()
+    } else {
+        CameraEffectsConfig::default()
+    };
+    cam_cfg.split_preview = false;
+
+    let mut pipe = VideoEffectsPipeline::new(backend);
+    let mut dec = Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            &in_path.to_string_lossy(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed spawning ffmpeg video decoder: {e}"))?;
+
+    let encoder = select_video_encoder(backend != "cpu");
+    let mut enc = spawn_video_encoder(out_path, meta.width, meta.height, meta.fps, encoder)?;
+
+    let frame_bytes = meta.width * meta.height * 3;
+    let mut raw_buf = vec![0u8; frame_bytes];
+    let mut idx = 0usize;
+
+    if let (Some(mut dec_out), Some(mut enc_in)) = (dec.stdout.take(), enc.stdin.take()) {
+        while dec_out.read_exact(&mut raw_buf).is_ok() {
+            if let Some(frame) = RgbFrame::from_rgb_vec(meta.width, meta.height, raw_buf.clone()) {
+                let processed = pipe.process_frame(&frame, &cam_cfg);
+                if enc_in.write_all(&processed.data).is_err() {
+                    break;
+                }
+            }
+            idx += 1;
+            if idx.is_multiple_of(5) {
+                let frac = (idx as f64 / meta.total_frames as f64).min(1.0);
+                println!("PROGRESS {frac:.4}");
+                let _ = std::io::stdout().flush();
+            }
+        }
+    }
+
+    let _ = dec.wait();
+    let enc_out = enc
+        .wait_with_output()
+        .map_err(|e| format!("encoder wait failed: {e}"))?;
+    if !enc_out.status.success() {
+        // Retry once with software encoder if NVENC failed (e.g. headless/no NVENC session)
+        if encoder == "h264_nvenc" {
+            return run_process_video(in_path, out_path, config_path, "cpu");
+        }
+        let err = String::from_utf8_lossy(&enc_out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            "ffmpeg video encode failed".to_string()
+        } else {
+            err
+        });
+    }
+    println!("PROGRESS 1.0000");
+    let _ = std::io::stdout().flush();
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = WorkerCli::parse();
     let Some(cmd) = cli.command else {
@@ -390,6 +685,12 @@ fn main() -> ExitCode {
             out_dir,
             backend,
         } => run_bench(&in_dir, &out_dir, &backend).map(Some),
+        WorkerCmd::ProcessVideo {
+            in_path,
+            out_path,
+            config,
+            backend,
+        } => run_process_video(&in_path, &out_path, config.as_deref(), &backend).map(|()| None),
     };
 
     match res {
@@ -405,5 +706,20 @@ fn main() -> ExitCode {
             eprintln!("error: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ffprobe_metadata() {
+        let sample = r#"{"streams":[{"width":1920,"height":1080,"avg_frame_rate":"60000/1001","nb_frames":"180"}]}"#;
+        let meta = parse_ffprobe_meta(sample).unwrap();
+        assert_eq!(meta.width, 1920);
+        assert_eq!(meta.height, 1080);
+        assert!((meta.fps - 59.94).abs() < 0.05);
+        assert_eq!(meta.total_frames, 180);
     }
 }
