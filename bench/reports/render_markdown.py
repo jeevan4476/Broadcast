@@ -242,31 +242,43 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
             if p_v.get("mask_vs_synthetic_gt"):
                 mm = p_v["mask_vs_synthetic_gt"]
-                lines.append(f"- **Synthetic Ground-Truth Matte:** IoU=`{mm['iou']}`, MAE=`{mm['mae']}`")
+                lines.append(f"- **Python Matte vs Synthetic GT:** IoU=`{mm['iou']}`, MAE=`{mm['mae']}`")
+        if r_v.get("status") == "ok":
+            lines.append(
+                f"- **Rust Video Backends:** segmentation=`{r_v.get('backend')}`, "
+                f"face=`{r_v.get('face_backend')}`, resolution=`{r_v.get('resolution')}`, "
+                f"worker peak RSS=`{r_v.get('peak_rss_mb', 0):.1f} MB`"
+            )
+            if r_v.get("mask_vs_synthetic_gt"):
+                rmm = r_v["mask_vs_synthetic_gt"]
+                lines.append(f"- **Rust Matte vs Synthetic GT:** IoU=`{rmm['iou']}`, MAE=`{rmm['mae']}`")
+        if p_v.get("status") == "ok" or r_v.get("status") == "ok":
             lines.append("")
-        lines.append("| Effect | Baseline FPS | Python FPS | Python p50 / p95 / max (ms) | Misses >33.3ms | BG Smoothness / Denoise | Rust |")
-        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-        effect_names = list((p_v.get("effects") or b_v.get("effects") or {}).keys())
+        lines.append("| Effect | Baseline FPS | Python FPS (p50/p95 ms) | Rust FPS (p50/p95 ms) | Speedup | Rust Quality |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+        effect_names = list((p_v.get("effects") or r_v.get("effects") or b_v.get("effects") or {}).keys())
         for ename in effect_names:
             be = (b_v.get("effects") or {}).get(ename)
             pe = (p_v.get("effects") or {}).get(ename)
             re_ = (r_v.get("effects") or {}).get(ename)
             b_fps = f"{be['fps']:.1f}" if be else "—"
-            p_fps = f"{pe['fps']:.1f}" if pe else "—"
-            p_lat = (
-                f"{pe['latency_ms']['p50']:.1f} / {pe['latency_ms']['p95']:.1f} / {pe['latency_ms']['max']:.1f}"
+            p_col = (
+                f"{pe['fps']:.1f} ({pe['latency_ms']['p50']:.1f}/{pe['latency_ms']['p95']:.1f})"
                 if pe
                 else "—"
             )
-            p_miss = str(pe["budget_misses_33ms"]) if pe else "—"
-            if pe and "denoise_psnr_gain_db" in pe:
-                q_col = f"+{pe['denoise_psnr_gain_db']:.2f} dB PSNR"
-            elif pe:
-                q_col = f"{pe['bg_smoothness_delta_pct']:+.1f}% grad"
+            if re_:
+                r_col = f"{re_['fps']:.1f} ({re_['latency_ms']['p50']:.1f}/{re_['latency_ms']['p95']:.1f})"
+                sp = f"**{re_['fps'] / max(pe['fps'], 0.01):.2f}x**" if pe else "—"
+                if "denoise_psnr_gain_db" in re_:
+                    q_col = f"+{re_['denoise_psnr_gain_db']:.2f} dB PSNR"
+                else:
+                    q_col = f"{re_['bg_smoothness_delta_pct']:+.1f}% grad"
             else:
+                r_col = f"`{r_st}`" if "rust" in targets else "—"
+                sp = "—"
                 q_col = "—"
-            r_col = f"{re_['fps']:.1f} fps" if re_ else (f"`{r_st}`" if "rust" in targets else "—")
-            lines.append(f"| `{ename}` | {b_fps} | {p_fps} | {p_lat} | {p_miss} | {q_col} | {r_col} |")
+            lines.append(f"| `{ename}` | {b_fps} | {p_col} | {r_col} | {sp} | {q_col} |")
         lines.append("")
 
     # Suite 5: Control Plane, CLI & HTTP/SSE API

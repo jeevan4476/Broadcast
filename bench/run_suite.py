@@ -194,7 +194,21 @@ def evaluate_gates(suites: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         ("pass" if r_wake <= 50.0 else "fail") if r_wake is not None else r6_st,
     )
 
-    # 10. Reliability invariants (active in Phase R0!)
+    # 10. 720p video FPS (blur quality)
+    s4 = suites.get("video", {})
+    p_vfps = (((s4.get("python") or {}).get("effects") or {}).get("background_blur_quality") or {}).get("fps")
+    r_vfps = (((s4.get("rust") or {}).get("effects") or {}).get("background_blur_quality") or {}).get("fps")
+    r4_st = (s4.get("rust") or {}).get("status", "pending_phase_r3")
+    _add(
+        "720p video FPS (`background_blur_quality`)",
+        "30.0 fps",
+        f"{p_vfps:.1f} fps" if p_vfps is not None else "—",
+        f"{r_vfps:.1f} fps" if r_vfps is not None else f"`{r4_st}`",
+        "Rust >= 28.0 fps",
+        ("pass" if r_vfps >= 28.0 else "fail") if r_vfps is not None else r4_st,
+    )
+
+    # 11. Reliability invariants (active in Phase R0!)
     s7 = suites.get("reliability", {})
     p_rel = s7.get("python") or {}
     r_rel = s7.get("rust") or {}

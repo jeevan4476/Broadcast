@@ -41,6 +41,51 @@ from bench.metrics.system_metrics import (
     query_power_supply,
     sample_process_tree,
 )
+from bench.metrics.video_metrics import (
+    compute_bg_smoothness_delta,
+    compute_mask_iou_mae,
+    compute_psnr_db,
+    compute_ssim,
+    generate_synthetic_portrait,
+    save_comparison_strip,
+)
+
+
+def _cuda_runtime_env(repo_root: Path) -> dict[str, str]:
+    """Build LD_LIBRARY_PATH + ORT_DYLIB_PATH so native Rust `ort` finds CUDA/cuDNN dylibs."""
+    env = dict(os.environ)
+    lib_dirs: list[str] = []
+    ort_dylib: str | None = env.get("ORT_DYLIB_PATH")
+
+    venv_roots = [
+        repo_root / ".venv",
+        repo_root.parent / "Broadcast" / ".venv",
+        Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "nv-broadcast" / "venv",
+    ]
+    for vr in venv_roots:
+        if not vr.is_dir():
+            continue
+        for sp in vr.glob("lib/python3.*/site-packages"):
+            capi = sp / "onnxruntime" / "capi"
+            if capi.is_dir():
+                lib_dirs.append(str(capi))
+                if not ort_dylib:
+                    for cand in sorted(capi.glob("libonnxruntime.so*")):
+                        if cand.is_file():
+                            ort_dylib = str(cand)
+                            break
+            for nv_lib in sorted((sp / "nvidia").glob("*/lib")):
+                if nv_lib.is_dir():
+                    lib_dirs.append(str(nv_lib))
+        if lib_dirs:
+            break
+
+    if lib_dirs:
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = ":".join([*lib_dirs, existing]) if existing else ":".join(lib_dirs)
+    if ort_dylib:
+        env["ORT_DYLIB_PATH"] = ort_dylib
+    return env
 
 
 class RustAdapter(TargetAdapter):
@@ -53,6 +98,7 @@ class RustAdapter(TargetAdapter):
         self.auto_build = auto_build
         self._cli_bin = Path(rust_cli_bin) if rust_cli_bin else self._locate_binary("nvb-cli")
         self._daemon_bin = self._locate_binary("nvb-daemon")
+        self._worker_bin = self._locate_binary("nvb-camera-worker")
         self._caps_cache: dict[str, Any] | None = None
 
     def _locate_binary(self, name: str) -> Path | None:
@@ -66,17 +112,21 @@ class RustAdapter(TargetAdapter):
         if release:
             rel_cli = self.rust_dir / "target" / "release" / "nvb-cli"
             rel_daemon = self.rust_dir / "target" / "release" / "nvb-daemon"
-            if rel_cli.is_file() and rel_daemon.is_file():
+            rel_worker = self.rust_dir / "target" / "release" / "nvb-camera-worker"
+            if rel_cli.is_file() and rel_daemon.is_file() and rel_worker.is_file():
                 self._cli_bin = rel_cli
                 self._daemon_bin = rel_daemon
+                self._worker_bin = rel_worker
                 return rel_cli
         if self._cli_bin is not None and self._cli_bin.is_file():
             if self._daemon_bin is None or not self._daemon_bin.is_file():
                 self._daemon_bin = self._locate_binary("nvb-daemon")
+            if self._worker_bin is None or not self._worker_bin.is_file():
+                self._worker_bin = self._locate_binary("nvb-camera-worker")
             return self._cli_bin
         if not self.auto_build or not shutil.which("cargo") or not (self.rust_dir / "Cargo.toml").is_file():
             return None
-        cmd = ["cargo", "build", "-p", "nvb-cli", "-p", "nvb-daemon"]
+        cmd = ["cargo", "build", "-p", "nvb-cli", "-p", "nvb-daemon", "-p", "nvb-camera-worker"]
         if release:
             cmd.append("--release")
         res = subprocess.run(cmd, cwd=str(self.rust_dir), capture_output=True, text=True, timeout=240, check=False)
@@ -84,7 +134,24 @@ class RustAdapter(TargetAdapter):
             return None
         self._cli_bin = self._locate_binary("nvb-cli")
         self._daemon_bin = self._locate_binary("nvb-daemon")
+        self._worker_bin = self._locate_binary("nvb-camera-worker")
         return self._cli_bin
+
+    def _ensure_worker_binary(self) -> Path | None:
+        self.ensure_binary()
+        if self._worker_bin is not None and self._worker_bin.is_file():
+            return self._worker_bin
+        if self.auto_build and shutil.which("cargo") and (self.rust_dir / "Cargo.toml").is_file():
+            subprocess.run(
+                ["cargo", "build", "-p", "nvb-camera-worker"],
+                cwd=str(self.rust_dir),
+                capture_output=True,
+                text=True,
+                timeout=240,
+                check=False,
+            )
+            self._worker_bin = self._locate_binary("nvb-camera-worker")
+        return self._worker_bin
 
     def _ensure_daemon_binary(self) -> Path | None:
         self.ensure_binary()
@@ -324,40 +391,12 @@ class RustAdapter(TargetAdapter):
 
         with tempfile.TemporaryDirectory(prefix="nvb_rust_mem_") as tmpdir:
             td = Path(tmpdir)
-            # Create a tiny isolated worker wrapper script that runs a real CUDA video
-            # session inside a child process spawned by `nvb-daemon`, proving 100% OS
-            # RAM + VRAM reclamation the instant `/api/camera/stop` kills the worker!
-            py_bin = detect_python_binary(self.repo_root)
-            worker_script = td / "camera_worker.sh"
-            worker_py = td / "camera_worker.py"
-            worker_py.write_text(
-                "\n".join(
-                    [
-                        "import sys, time",
-                        "from bench.metrics.video_metrics import generate_synthetic_portrait",
-                        "from nv_broadcast.video_effects import VideoEffectsPipeline",
-                        "pipe = VideoEffectsPipeline(segmentation_backend='rvm_cuda')",
-                        "cfg = {'effects': {'background_blur': {'enabled': True, 'strength': 0.75, 'mode': 'quality'}}}",
-                        "frame, _ = generate_synthetic_portrait(1280, 720, frame_index=0)",
-                        "for _ in range(4):",
-                        "    pipe.process_frame(frame, cfg)",
-                        "while True:",
-                        "    time.sleep(0.2)",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            worker_script.write_text(
-                f"#!/usr/bin/env bash\nPYTHONPATH='{self.repo_root}' exec '{py_bin}' '{worker_py}'\n",
-                encoding="utf-8",
-            )
-            os.chmod(worker_script, 0o755)
+            worker_bin = self._ensure_worker_binary()
+            cuda_env = _cuda_runtime_env(self.repo_root)
+            if worker_bin is not None:
+                cuda_env["NVB_CAMERA_WORKER"] = str(worker_bin)
 
-            proc, base_url, token, _ = self._spawn_temp_daemon(
-                td,
-                extra_env={"NVB_CAMERA_WORKER": str(worker_script)},
-            )
+            proc, base_url, token, _ = self._spawn_temp_daemon(td, extra_env=cuda_env)
             try:
                 def http_post(path: str, body: dict[str, Any]) -> None:
                     req = urllib.request.Request(
@@ -376,19 +415,38 @@ class RustAdapter(TargetAdapter):
                 time.sleep(0.5)
                 checkpoints["idle_standby"] = _snap(proc.pid)
 
-                # 2. Active Audio Processing (trigger live Rust nnnoiseless sample + measure process)
+                # 2. Active Audio Processing
                 http_post("/api/audio/speaker/sample", {"kind": "fan_echo"})
                 checkpoints["active_audio_call"] = _snap(proc.pid, {"backend": "nnnoiseless"})
 
-                # 3. Active Video Call (isolated child worker -> CUDA/CPU)
-                http_post("/api/camera/start", {"preview_only": True})
-                # Give worker a moment to initialize ONNX CUDA & process frames
-                time.sleep(2.5 if profile == "quick" else 4.5)
-                checkpoints["active_video_cuda"] = _snap(proc.pid, {"mode": "isolated_child_worker"})
+                # 3. Active Video Call (CPU native Rust worker)
+                if worker_bin is not None:
+                    cpu_w = subprocess.Popen(
+                        [str(worker_bin), "hold", "--backend", "rvm_cpu", "--frames", "3"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        env=cuda_env,
+                    )
+                    try:
+                        assert cpu_w.stdout is not None
+                        ready_line = cpu_w.stdout.readline().strip()
+                        checkpoints["active_video_cpu"] = _snap(cpu_w.pid, {"worker_ready": ready_line})
+                    finally:
+                        cpu_w.terminate()
+                        try:
+                            cpu_w.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            cpu_w.kill()
 
-                # 4. Stop camera -> worker exits -> OS immediately reclaims 100% RAM & VRAM!
+                # 4. Active Video Call (RTX CUDA native Rust worker spawned by nvb-daemon)
+                http_post("/api/camera/start", {"preview_only": True})
+                time.sleep(2.5 if profile == "quick" else 4.5)
+                checkpoints["active_video_cuda"] = _snap(proc.pid, {"mode": "native_rust_camera_worker"})
+
+                # 5. Stop camera -> native worker exits -> OS immediately reclaims 100% RAM & VRAM!
                 http_post("/api/camera/stop", {})
-                time.sleep(1.0 if profile == "quick" else 3.0)
+                time.sleep(1.0 if profile == "quick" else 2.5)
                 checkpoints["post_call_idle"] = _snap(proc.pid, {"reclaimed": True})
 
                 if soak_sec > 0:
@@ -439,7 +497,97 @@ class RustAdapter(TargetAdapter):
     ) -> dict[str, Any]:
         if not self._has_cap("video_pipeline"):
             return self._pending_status("video", "pending_phase_r3")
-        return self._pending_status("video", "pending_phase_r3")
+        worker = self._ensure_worker_binary()
+        if worker is None:
+            return {"status": "unavailable", "reason": "nvb-camera-worker binary unavailable"}
+
+        from PIL import Image  # type: ignore
+
+        w, h = (640, 360) if profile == "quick" else (1280, 720)
+        n_frames = 10 if profile == "quick" else 30
+        clean_frames = [generate_synthetic_portrait(w, h, frame_index=i, add_sensor_noise=False) for i in range(n_frames)]
+        noisy_frames = [generate_synthetic_portrait(w, h, frame_index=i, add_sensor_noise=True) for i in range(n_frames)]
+
+        def _save_rgb(fr: Any, p: Path) -> None:
+            im = fr if isinstance(fr, Image.Image) else Image.fromarray(fr, mode="RGB")
+            im.save(str(p))
+
+        with tempfile.TemporaryDirectory(prefix="nvb_rust_video_") as tmpdir:
+            td = Path(tmpdir)
+            in_dir = td / "in"
+            w_out = td / "out"
+            in_dir.mkdir(parents=True, exist_ok=True)
+            for idx, (fr, _) in enumerate(clean_frames):
+                _save_rgb(fr, in_dir / f"clean_{idx:03d}.png")
+            for idx, (fr, _) in enumerate(noisy_frames):
+                _save_rgb(fr, in_dir / f"noisy_{idx:03d}.png")
+
+            cuda_env = _cuda_runtime_env(self.repo_root)
+            res = subprocess.run(
+                [str(worker), "bench", "--in-dir", str(in_dir), "--out-dir", str(w_out), "--backend", "auto"],
+                capture_output=True,
+                text=True,
+                env=cuda_env,
+                timeout=240,
+                check=False,
+            )
+            if res.returncode != 0:
+                return {"status": "error", "error": res.stderr.strip() or res.stdout.strip()}
+
+            raw_data = json.loads(res.stdout)
+            alpha_img = Image.open(raw_data["alpha_png"]).convert("L")
+            _, sample_gt = clean_frames[0]
+            mask_metrics = compute_mask_iou_mae(alpha_img, sample_gt)
+
+            strips: list[str] = []
+            strip_dir = (out_dir / "video_strips") if out_dir is not None else None
+            clean_ref, clean_mask = clean_frames[-1]
+            noisy_ref, noisy_mask = noisy_frames[-1]
+
+            effects_out: dict[str, Any] = {}
+            for ename, edata in raw_data["effects"].items():
+                out_im = Image.open(edata["out_png"]).convert("RGB")
+                ref_raw = noisy_ref if ename == "video_noise_removal" else clean_ref
+                ref_mask = noisy_mask if ename == "video_noise_removal" else clean_mask
+                entry = {
+                    "status": "ok",
+                    "frames": edata["frames"],
+                    "fps": edata["fps"],
+                    "latency_ms": edata["latency_ms"],
+                    "budget_misses_33ms": edata["budget_misses_33ms"],
+                    "psnr_vs_raw_db": round(compute_psnr_db(ref_raw, out_im), 2),
+                    "ssim_vs_raw": round(compute_ssim(ref_raw, out_im), 4),
+                    "bg_smoothness_delta_pct": compute_bg_smoothness_delta(ref_raw, out_im, ref_mask),
+                }
+                if ename == "video_noise_removal":
+                    p_noisy = round(compute_psnr_db(clean_ref, ref_raw), 2)
+                    p_den = round(compute_psnr_db(clean_ref, out_im), 2)
+                    entry["psnr_noisy_vs_clean_db"] = p_noisy
+                    entry["psnr_denoised_vs_clean_db"] = p_den
+                    entry["denoise_psnr_gain_db"] = round(p_den - p_noisy, 2)
+                if strip_dir is not None and ename in (
+                    "background_blur_quality",
+                    "background_replace",
+                    "combo_blur_keylight_autoframe",
+                ):
+                    sp = save_comparison_strip(
+                        [("Raw (Baseline)", ref_raw), (f"Rust ({raw_data['backend']})", out_im)],
+                        strip_dir / f"{ename}_rust.png",
+                    )
+                    if sp:
+                        strips.append(sp)
+                effects_out[ename] = entry
+
+            return {
+                "status": "ok",
+                "backend": raw_data["backend"],
+                "face_backend": raw_data["face_backend"],
+                "resolution": raw_data["resolution"],
+                "peak_rss_mb": round(float(raw_data.get("rss_kb", 0)) / 1024.0, 2),
+                "mask_vs_synthetic_gt": mask_metrics,
+                "effects": effects_out,
+                "strips": strips,
+            }
 
     def run_api_cli(self, profile: str = "quick") -> dict[str, Any]:
         cli = self.ensure_binary()

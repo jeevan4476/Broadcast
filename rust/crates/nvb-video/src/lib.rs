@@ -1,8 +1,14 @@
-//! On-demand webcam debounce and V4L2 mode selection contracts.
+//! On-demand webcam debounce, V4L2 mode selection, and pure-Rust GPU/CPU video effects.
+
+pub mod effects;
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
+pub use effects::{
+    build_preset_background, find_onnxruntime_dylib, parse_hex_color, CameraEffectsConfig, FaceBox,
+    PortraitSegmenter, RgbFrame, VideoEffectsPipeline,
+};
 pub use nvb_core::camera_state::CameraState;
 
 /// Tracks continuous idle time after v4l2loopback consumers drop to 0 before releasing the camera.

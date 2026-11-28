@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+clap.workspace = true
+image.workspace = true
 nvb-core.workspace = true
 nvb-video.workspace = true
+serde_json.workspace = true

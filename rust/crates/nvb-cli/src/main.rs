@@ -242,7 +242,7 @@ fn capabilities_payload() -> Value {
         "target": "rust",
         "app": APP_NAME,
         "version": APP_VERSION,
-        "phase": "R2",
+        "phase": "R3",
         "audio_backend": "nnnoiseless",
         "capabilities": {
             "config_bench": true,
@@ -251,11 +251,9 @@ fn capabilities_payload() -> Value {
             "audio_dsp": true,
             "daemon_http": true,
             "cli_full": true,
-            "video_pipeline": false
+            "video_pipeline": true
         },
-        "pending_phases": {
-            "video": "pending_phase_r3"
-        }
+        "pending_phases": {}
     })
 }
 
@@ -868,7 +866,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bench_capabilities_reports_r2_contract() {
+    fn bench_capabilities_reports_r3_contract() {
         let val = capabilities_payload();
         assert_eq!(val["target"], "rust");
         assert_eq!(val["capabilities"]["config_bench"], true);
@@ -877,7 +875,7 @@ mod tests {
         assert_eq!(val["capabilities"]["audio_dsp"], true);
         assert_eq!(val["capabilities"]["daemon_http"], true);
         assert_eq!(val["capabilities"]["cli_full"], true);
-        assert_eq!(val["pending_phases"]["video"], "pending_phase_r3");
+        assert_eq!(val["capabilities"]["video_pipeline"], true);
     }
 
     #[test]

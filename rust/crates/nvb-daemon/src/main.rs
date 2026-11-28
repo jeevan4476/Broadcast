@@ -134,19 +134,61 @@ impl CameraController {
         self.face_backend = "worker".to_string();
         self.last_error.clear();
 
-        // Optional isolated external worker command (`NVB_CAMERA_WORKER`)
-        if let Ok(worker_cmd) = env::var("NVB_CAMERA_WORKER") {
-            let trimmed = worker_cmd.trim();
-            if !trimmed.is_empty() {
-                match Command::new(trimmed)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                {
-                    Ok(child) => self.worker = Some(child),
-                    Err(e) => self.last_error = format!("worker spawn failed: {e}"),
+        // Spawn isolated camera worker (`NVB_CAMERA_WORKER` override or sibling `nvb-camera-worker`)
+        let worker_bin: Option<PathBuf> = env::var("NVB_CAMERA_WORKER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::current_exe()
+                    .ok()
+                    .map(|p| p.with_file_name("nvb-camera-worker"))
+                    .filter(|p| p.is_file())
+            });
+
+        if let Some(bin) = worker_bin {
+            let mut cmd = Command::new(&bin);
+            if bin
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "nvb-camera-worker")
+            {
+                if preview_only {
+                    cmd.args([
+                        "hold",
+                        "--backend",
+                        &cfg.segmentation_backend,
+                        "--width",
+                        &cfg.camera.width.to_string(),
+                        "--height",
+                        &cfg.camera.height.to_string(),
+                    ]);
+                } else {
+                    cmd.args([
+                        "stream",
+                        "--input",
+                        &cfg.camera.device,
+                        "--output",
+                        &cfg.camera.output_device,
+                        "--width",
+                        &cfg.camera.width.to_string(),
+                        "--height",
+                        &cfg.camera.height.to_string(),
+                        "--fps",
+                        &cfg.camera.fps.to_string(),
+                        "--backend",
+                        &cfg.segmentation_backend,
+                    ]);
                 }
+            }
+            match cmd
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => self.worker = Some(child),
+                Err(e) => self.last_error = format!("worker spawn failed: {e}"),
             }
         }
         (true, "Started camera session".to_string())
