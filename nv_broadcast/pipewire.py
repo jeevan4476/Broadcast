@@ -77,6 +77,55 @@ def list_pw_ports(direction: str = "output", timeout: float = 2.5) -> list[str]:
         return []
 
 
+def parse_pw_links(output: str) -> list[tuple[str, str]]:
+    """Parse `pw-link -l` output into directed `(src_port, dst_port)` tuples."""
+    edges: list[tuple[str, str]] = []
+    current_src = ""
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            current_src = line.strip()
+        elif "|->" in line and current_src:
+            dst = line.split("|->", 1)[1].strip()
+            if dst:
+                edges.append((current_src, dst))
+    return edges
+
+
+def list_pw_links(timeout: float = 2.5) -> list[tuple[str, str]]:
+    """Return active PipeWire links as `(src_port, dst_port)` pairs."""
+    if not shutil.which("pw-link"):
+        return []
+    try:
+        proc = subprocess.run(
+            ["pw-link", "-l"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return []
+        return parse_pw_links(proc.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def is_pw_link_active(
+    src_node: str,
+    dst_node: str,
+    links: list[tuple[str, str]] | None = None,
+) -> bool:
+    """Return True if at least one active PipeWire link connects `src_node` -> `dst_node`."""
+    if not src_node or not dst_node:
+        return False
+    active = links if links is not None else list_pw_links()
+    src_prefix = f"{src_node}:"
+    dst_prefix = f"{dst_node}:"
+    return any(s.startswith(src_prefix) and d.startswith(dst_prefix) for s, d in active)
+
+
 def select_port_pairs(
     src_node: str,
     dst_node: str,

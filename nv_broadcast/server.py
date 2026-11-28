@@ -479,7 +479,8 @@ def make_handler(runtime: BroadcastRuntime, auth_token: str) -> type[BaseHTTPReq
                 if restart and runtime.video.running:
                     was_on_demand = runtime.video.on_demand_active and not runtime.video.manual_active
                     runtime.video.stop()
-                    runtime.video.start(_from_on_demand=was_on_demand)
+                    if (not was_on_demand) or bool(cam.get("on_demand", True)):
+                        runtime.video.start(_from_on_demand=was_on_demand)
                 elif restart and runtime.video.standby_active:
                     runtime.video.stop_standby(permanent=False)
                     runtime.video.start_standby()
@@ -561,7 +562,7 @@ def run_server(
     if autostart:
         runtime.audio.start_microphone()
         runtime.audio.start_speakers()
-        runtime.video.start_standby()
+        runtime.video.start_standby(wait_for_device=True)
 
     state_file = daemon_state_path() if write_daemon_file else None
     if state_file is not None:

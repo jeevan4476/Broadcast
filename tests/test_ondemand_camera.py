@@ -265,8 +265,8 @@ class TestVideoEngineOnDemand(unittest.TestCase):
         engine.apply_saved_v4l2_controls = mock.Mock()
         engine._open_virtual_output = tracker.open_writer  # type: ignore[method-assign]
         engine._close_virtual_output = tracker.close_writer  # type: ignore[method-assign]
-        engine._write_virtual_output_np = mock.Mock()  # type: ignore[method-assign]
-        engine._write_virtual_output_pil = mock.Mock()  # type: ignore[method-assign]
+        engine._write_virtual_output_np = mock.Mock(return_value=True)  # type: ignore[method-assign]
+        engine._write_virtual_output_pil = mock.Mock(return_value=True)  # type: ignore[method-assign]
 
         def fake_capture(in_dev: str, pixfmt: str, width: int, height: int, fps: int, out_writer: Any) -> None:
             capture_starts.append(1)
@@ -410,6 +410,28 @@ class TestVideoEngineOnDemand(unittest.TestCase):
             finally:
                 engine.shutdown_all()
 
+            self.assertEqual(tracker.active, 0)
+
+    def test_standby_self_heals_after_writer_drop(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cfg = BroadcastConfig(Path(tmp) / "config.json")
+            cfg.data["camera"]["on_demand"] = False
+            consumers_ref: list[list[dict[str, Any]]] = [[]]
+            clock = _FakeClock(4000.0)
+
+            engine, tracker, _ = self._build_mocked_engine(cfg, consumers_ref, clock)
+            # First write fails (simulating suspend/resume v4l2loopback drop), subsequent writes succeed
+            write_results = iter([False, True, True, True, True])
+            engine._write_virtual_output_np = mock.Mock(side_effect=lambda *_a: next(write_results, True))  # type: ignore[method-assign]
+            engine._write_virtual_output_pil = mock.Mock(side_effect=lambda *_a: next(write_results, True))  # type: ignore[method-assign]
+            try:
+                ok, _ = engine.start_standby()
+                self.assertTrue(ok)
+                self.assertTrue(_wait_until(lambda: tracker.total_opens >= 2, timeout=3.5))
+                self.assertTrue(engine.standby_active)
+                self.assertEqual(tracker.active, 1)
+            finally:
+                engine.shutdown_all()
             self.assertEqual(tracker.active, 0)
 
 

@@ -14,6 +14,7 @@ Neural backends (automatic tiering):
 
 from __future__ import annotations
 
+import importlib.util
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,38 +32,76 @@ except ImportError:
     np = None  # type: ignore
     HAS_NUMPY = False
 
-try:
-    import cv2  # type: ignore
+# Heavy native libraries (OpenCV, MediaPipe, ONNX Runtime CUDA/cuDNN) are checked via
+# find_spec() and loaded lazily on first VideoEffectsPipeline use so an idle audio-only
+# daemon stays below ~75 MB RAM and 0 MiB VRAM instead of preloading ~650 MB of GPU DLLs.
+cv2: Any = None
+HAS_CV2: bool = importlib.util.find_spec("cv2") is not None
 
-    HAS_CV2 = True
-except ImportError:
-    cv2 = None  # type: ignore
-    HAS_CV2 = False
+mp: Any = None
+mp_python: Any = None
+mp_vision: Any = None
+HAS_MEDIAPIPE: bool = importlib.util.find_spec("mediapipe") is not None
 
-try:
-    import mediapipe as mp  # type: ignore
-    from mediapipe.tasks import python as mp_python  # type: ignore
-    from mediapipe.tasks.python import vision as mp_vision  # type: ignore
+ort: Any = None
+HAS_ONNX: bool = importlib.util.find_spec("onnxruntime") is not None
 
-    HAS_MEDIAPIPE = True
-except Exception:
-    mp = None  # type: ignore
-    mp_python = None  # type: ignore
-    mp_vision = None  # type: ignore
-    HAS_MEDIAPIPE = False
 
-try:
-    import onnxruntime as ort  # type: ignore
+def _ensure_cv2() -> Any:
+    global cv2, HAS_CV2
+    if cv2 is not None:
+        return cv2
+    if not HAS_CV2:
+        return None
+    try:
+        import cv2 as _cv2  # type: ignore
 
-    if hasattr(ort, "preload_dlls"):
-        try:
-            ort.preload_dlls()
-        except Exception:
-            pass
-    HAS_ONNX = True
-except ImportError:
-    ort = None  # type: ignore
-    HAS_ONNX = False
+        cv2 = _cv2
+        return cv2
+    except Exception:
+        HAS_CV2 = False
+        return None
+
+
+def _ensure_mediapipe() -> tuple[Any, Any, Any]:
+    global mp, mp_python, mp_vision, HAS_MEDIAPIPE
+    if mp is not None and mp_python is not None and mp_vision is not None:
+        return mp, mp_python, mp_vision
+    if not HAS_MEDIAPIPE:
+        return None, None, None
+    try:
+        import mediapipe as _mp  # type: ignore
+        from mediapipe.tasks import python as _mp_python  # type: ignore
+        from mediapipe.tasks.python import vision as _mp_vision  # type: ignore
+
+        mp = _mp
+        mp_python = _mp_python
+        mp_vision = _mp_vision
+        return mp, mp_python, mp_vision
+    except Exception:
+        HAS_MEDIAPIPE = False
+        return None, None, None
+
+
+def _ensure_onnx() -> Any:
+    global ort, HAS_ONNX
+    if ort is not None:
+        return ort
+    if not HAS_ONNX:
+        return None
+    try:
+        import onnxruntime as _ort  # type: ignore
+
+        if hasattr(_ort, "preload_dlls"):
+            try:
+                _ort.preload_dlls()
+            except Exception:
+                pass
+        ort = _ort
+        return ort
+    except Exception:
+        HAS_ONNX = False
+        return None
 
 
 def parse_hex_color(hex_str: str, default: tuple[int, int, int] = (0, 255, 0)) -> tuple[int, int, int]:
@@ -77,7 +116,7 @@ def parse_hex_color(hex_str: str, default: tuple[int, int, int] = (0, 255, 0)) -
 
 def build_preset_background(preset: str, width: int, height: int) -> Image.Image:
     """Generate clean, realistic studio backdrops when no custom image is chosen."""
-    if HAS_NUMPY and HAS_CV2:
+    if HAS_NUMPY and _ensure_cv2() is not None:
         y = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None]
         x = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :]
         img = np.zeros((height, width, 3), dtype=np.float32)
@@ -157,20 +196,22 @@ class AutoFrameTracker:
         if HAS_MEDIAPIPE and HAS_NUMPY:
             fl_path = model_path("face_landmarker")
             if fl_path.is_file():
-                try:
-                    opts = mp_vision.FaceLandmarkerOptions(
-                        base_options=mp_python.BaseOptions(model_asset_path=str(fl_path)),
-                        num_faces=1,
-                        min_face_detection_confidence=0.45,
-                        min_face_presence_confidence=0.45,
-                        min_tracking_confidence=0.45,
-                    )
-                    self._landmarker = mp_vision.FaceLandmarker.create_from_options(opts)
-                    self.backend_name = "mediapipe_face_landmarker"
-                except Exception:
-                    self._landmarker = None
+                _mp, _mp_py, _mp_vis = _ensure_mediapipe()
+                if _mp_vis is not None and _mp_py is not None:
+                    try:
+                        opts = _mp_vis.FaceLandmarkerOptions(
+                            base_options=_mp_py.BaseOptions(model_asset_path=str(fl_path)),
+                            num_faces=1,
+                            min_face_detection_confidence=0.45,
+                            min_face_presence_confidence=0.45,
+                            min_tracking_confidence=0.45,
+                        )
+                        self._landmarker = _mp_vis.FaceLandmarker.create_from_options(opts)
+                        self.backend_name = "mediapipe_face_landmarker"
+                    except Exception:
+                        self._landmarker = None
 
-        if self._landmarker is None and HAS_CV2:
+        if self._landmarker is None and _ensure_cv2() is not None:
             try:
                 cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
                 if Path(cascade_path).is_file():
@@ -315,14 +356,16 @@ class PortraitSegmenter:
         self._rvm_sess = None
 
     def _init_backend(self) -> None:
+        _ensure_cv2()
         rvm_path = Path(self.model_file) if self.model_file else model_path("rvm_mobilenetv3")
         mp_path = model_path("selfie_segmenter")
 
         # 1. RVM ONNX on RTX CUDA (best quality + temporal coherence + GPU accelerated)
         if HAS_ONNX and HAS_NUMPY and rvm_path.is_file() and self.preferred_backend in ("auto", "rvm_cuda", "onnx_cuda"):
-            if "CUDAExecutionProvider" in ort.get_available_providers():
+            _ort = _ensure_onnx()
+            if _ort is not None and "CUDAExecutionProvider" in _ort.get_available_providers():
                 try:
-                    sess = ort.InferenceSession(str(rvm_path), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+                    sess = _ort.InferenceSession(str(rvm_path), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
                     if "CUDAExecutionProvider" in sess.get_providers():
                         self._rvm_sess = sess
                         self._rvm_rec = [np.zeros([1, 1, 1, 1], dtype=np.float32)] * 4
@@ -333,27 +376,31 @@ class PortraitSegmenter:
 
         # 2. MediaPipe Tasks ImageSegmenter (9ms/frame, razor-sharp hair/shoulder contour)
         if HAS_MEDIAPIPE and HAS_NUMPY and mp_path.is_file() and self.preferred_backend in ("auto", "mediapipe"):
-            try:
-                opts = mp_vision.ImageSegmenterOptions(
-                    base_options=mp_python.BaseOptions(model_asset_path=str(mp_path)),
-                    output_confidence_masks=True,
-                    output_category_mask=False,
-                )
-                self._mp_seg = mp_vision.ImageSegmenter.create_from_options(opts)
-                self.backend_name = "mediapipe"
-                return
-            except Exception:
-                self._mp_seg = None
+            _mp, _mp_py, _mp_vis = _ensure_mediapipe()
+            if _mp_vis is not None and _mp_py is not None:
+                try:
+                    opts = _mp_vis.ImageSegmenterOptions(
+                        base_options=_mp_py.BaseOptions(model_asset_path=str(mp_path)),
+                        output_confidence_masks=True,
+                        output_category_mask=False,
+                    )
+                    self._mp_seg = _mp_vis.ImageSegmenter.create_from_options(opts)
+                    self.backend_name = "mediapipe"
+                    return
+                except Exception:
+                    self._mp_seg = None
 
         # 3. RVM ONNX on CPU (34fps recurrent matting)
         if HAS_ONNX and HAS_NUMPY and rvm_path.is_file() and self.preferred_backend in ("auto", "rvm_cpu", "onnx_cpu"):
-            try:
-                self._rvm_sess = ort.InferenceSession(str(rvm_path), providers=["CPUExecutionProvider"])
-                self._rvm_rec = [np.zeros([1, 1, 1, 1], dtype=np.float32)] * 4
-                self.backend_name = "rvm_cpu"
-                return
-            except Exception:
-                self._rvm_sess = None
+            _ort = _ensure_onnx()
+            if _ort is not None:
+                try:
+                    self._rvm_sess = _ort.InferenceSession(str(rvm_path), providers=["CPUExecutionProvider"])
+                    self._rvm_rec = [np.zeros([1, 1, 1, 1], dtype=np.float32)] * 4
+                    self.backend_name = "rvm_cpu"
+                    return
+                except Exception:
+                    self._rvm_sess = None
 
         self.backend_name = "fast_portrait"
 
@@ -472,6 +519,7 @@ class VideoEffectsPipeline:
     """Full NVIDIA Broadcast v2.3.0 GPU/Neural Camera Effects Pipeline."""
 
     def __init__(self, segmentation_backend: str = "auto") -> None:
+        _ensure_cv2()
         self.tracker = AutoFrameTracker()
         self.segmenter = PortraitSegmenter(preferred_backend=segmentation_backend)
         self._prev_denoise_np: Any = None

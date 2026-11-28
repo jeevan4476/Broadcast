@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+import gc
+import importlib.util
 import io
 import os
 import shutil
@@ -18,25 +20,39 @@ from .config import BroadcastConfig
 from .devices import find_loopback_cameras, list_cameras
 from .loopback_monitor import OnDemandDebounce, list_loopback_consumers
 from .v4l2_ctl import choose_best_pixel_format, set_v4l2_control
-from .video_effects import HAS_CV2, HAS_NUMPY, VideoEffectsPipeline
-
-try:
-    import cv2  # type: ignore
-except ImportError:
-    cv2 = None  # type: ignore
+from .video_effects import HAS_CV2, HAS_NUMPY, VideoEffectsPipeline, _ensure_cv2
 
 try:
     import numpy as np  # type: ignore
 except ImportError:
     np = None  # type: ignore
 
-try:
-    import pyvirtualcam  # type: ignore
+cv2: Any = None
+pyvirtualcam: Any = None
+HAS_PYVIRTUALCAM: bool = importlib.util.find_spec("pyvirtualcam") is not None
 
-    HAS_PYVIRTUALCAM = True
-except ImportError:
-    pyvirtualcam = None  # type: ignore
-    HAS_PYVIRTUALCAM = False
+
+def _load_cv2() -> Any:
+    global cv2
+    if cv2 is None:
+        cv2 = _ensure_cv2()
+    return cv2
+
+
+def _load_pyvirtualcam() -> Any:
+    global pyvirtualcam, HAS_PYVIRTUALCAM
+    if pyvirtualcam is not None:
+        return pyvirtualcam
+    if not HAS_PYVIRTUALCAM:
+        return None
+    try:
+        import pyvirtualcam as _pvc  # type: ignore
+
+        pyvirtualcam = _pvc
+        return pyvirtualcam
+    except Exception:
+        HAS_PYVIRTUALCAM = False
+        return None
 
 
 class VideoEngine:
@@ -52,13 +68,9 @@ class VideoEngine:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
-        self.pipeline = (
-            pipeline
-            if pipeline is not None
-            else VideoEffectsPipeline(
-                segmentation_backend=config.data.get("segmentation_backend", "auto")
-            )
-        )
+        self._pipeline: Any = pipeline
+        self._injected_pipeline: bool = pipeline is not None
+        self._pipeline_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._running = False
@@ -133,12 +145,44 @@ class VideoEngine:
         return self._last_error
 
     @property
+    def pipeline(self) -> Any:
+        return self._ensure_pipeline()
+
+    def _ensure_pipeline(self) -> Any:
+        with self._pipeline_lock:
+            if self._pipeline is None:
+                self._pipeline = VideoEffectsPipeline(
+                    segmentation_backend=self.config.data.get("segmentation_backend", "auto")
+                )
+            return self._pipeline
+
+    def _release_pipeline(self) -> None:
+        with self._pipeline_lock:
+            pipe = self._pipeline
+            if pipe is None:
+                return
+            if hasattr(pipe, "close"):
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+            if not self._injected_pipeline:
+                self._pipeline = None
+                gc.collect()
+
+    @property
     def segmentation_backend(self) -> str:
-        return self.pipeline.segmenter.backend_name
+        pipe = self._pipeline
+        if pipe is None:
+            return "standby"
+        return str(pipe.segmenter.backend_name)
 
     @property
     def face_backend(self) -> str:
-        return self.pipeline.tracker.backend_name
+        pipe = self._pipeline
+        if pipe is None:
+            return "standby"
+        return str(pipe.tracker.backend_name)
 
     def add_frame_callback(self, cb: Callable[[Image.Image], None]) -> None:
         self._frame_callbacks.append(cb)
@@ -159,14 +203,16 @@ class VideoEngine:
             frame_pil = self._latest_frame_pil
             seq = self._frame_seq
         if HAS_CV2 and frame_np is not None:
-            bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
-            ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-            if ok:
-                data = enc.tobytes()
-                with self._lock:
-                    if self._frame_seq == seq:
-                        self._latest_jpeg = data
-                return seq, data
+            _cv2 = _load_cv2()
+            if _cv2 is not None:
+                bgr = _cv2.cvtColor(frame_np, _cv2.COLOR_RGB2BGR)
+                ok, enc = _cv2.imencode(".jpg", bgr, [int(_cv2.IMWRITE_JPEG_QUALITY), quality])
+                if ok:
+                    data = enc.tobytes()
+                    with self._lock:
+                        if self._frame_seq == seq:
+                            self._latest_jpeg = data
+                    return seq, data
         if frame_pil is not None:
             buf = io.BytesIO()
             frame_pil.save(buf, format="JPEG", quality=quality)
@@ -334,19 +380,20 @@ class VideoEngine:
                 if self._keep_standby:
                     self._start_standby_writer()
 
-    def _start_standby_writer(self, out_dev: str | None = None) -> tuple[bool, str]:
+    def _start_standby_writer(self, out_dev: str | None = None, *, allow_wait: bool = False) -> tuple[bool, str]:
         with self._state_lock:
             if self._running or self._standby_active:
                 return True, "Virtual camera already active"
             dev = out_dev or self.resolve_output_device()
-            if not dev:
+            if not dev and not allow_wait:
                 return False, "No v4l2loopback device available for standby"
             cam_cfg = self.config.data["camera"]
             width = int(cam_cfg.get("width", 1280))
             height = int(cam_cfg.get("height", 720))
             fps = int(cam_cfg.get("fps", 30))
             self._active_output = dev
-            self._watched_device = dev
+            if dev:
+                self._watched_device = dev
             self._standby_stop.clear()
             self._standby_active = True
             self._standby_thread = threading.Thread(
@@ -356,7 +403,11 @@ class VideoEngine:
                 daemon=True,
             )
             self._standby_thread.start()
-            return True, f"Virtual camera standby active on {dev}"
+            return True, (
+                f"Virtual camera standby active on {dev}"
+                if dev
+                else "Virtual camera standby waiting for v4l2loopback device"
+            )
 
     def _stop_standby_writer(self) -> None:
         with self._state_lock:
@@ -367,20 +418,21 @@ class VideoEngine:
             self._standby_thread = None
             self._standby_active = False
 
-    def start_standby(self) -> tuple[bool, str]:
+    def start_standby(self, *, wait_for_device: bool = False) -> tuple[bool, str]:
         """Keep v4l2loopback visible to Discord/Meet/Brave (exclusive_caps=1) with webcam LED off."""
         with self._state_lock:
             self._keep_standby = True
             out_dev = self.resolve_output_device()
-            if not out_dev:
+            if not out_dev and not wait_for_device:
                 return False, "No v4l2loopback device available for standby"
-            self._watched_device = out_dev
+            if out_dev:
+                self._watched_device = out_dev
             if self._running or self._standby_active:
-                if self._is_on_demand_enabled():
+                if out_dev and self._is_on_demand_enabled():
                     self._start_watcher(out_dev)
                 return True, "Virtual camera already active"
-            ok, msg = self._start_standby_writer(out_dev)
-            if ok and self._is_on_demand_enabled():
+            ok, msg = self._start_standby_writer(out_dev, allow_wait=wait_for_device)
+            if ok and out_dev and self._is_on_demand_enabled():
                 self._start_watcher(out_dev)
             return ok, msg
 
@@ -405,18 +457,43 @@ class VideoEngine:
         draw.text((cx - 125, cy - 18), "NVIDIA BROADCAST CAMERA", fill=(118, 185, 0))
         draw.text((cx - 155, cy + 8), "Camera is off - enable Camera in app", fill=(185, 190, 196))
         slate_np = np.asarray(slate, dtype=np.uint8) if HAS_NUMPY else None
-        writer = self._open_virtual_output(out_dev, width, height, fps)
+
+        current_dev = out_dev
         try:
-            if writer is None:
-                return
+            # Self-healing standby loop: survives boot races and suspend/resume drops on /dev/video10.
             while not self._standby_stop.is_set():
-                if slate_np is not None:
-                    self._write_virtual_output_np(writer, slate_np)
-                else:
-                    self._write_virtual_output_pil(writer, slate)
-                self._standby_stop.wait(1.0)
+                if not current_dev:
+                    current_dev = self.resolve_output_device()
+                    if not current_dev:
+                        self._standby_stop.wait(2.5)
+                        continue
+                    with self._state_lock:
+                        self._active_output = current_dev
+                        self._watched_device = current_dev
+                        if self._is_on_demand_enabled():
+                            self._start_watcher(current_dev)
+
+                writer = self._open_virtual_output(current_dev, width, height, fps)
+                if writer is None:
+                    current_dev = ""
+                    self._standby_stop.wait(2.5)
+                    continue
+                try:
+                    while not self._standby_stop.is_set():
+                        if slate_np is not None:
+                            ok = self._write_virtual_output_np(writer, slate_np)
+                        else:
+                            ok = self._write_virtual_output_pil(writer, slate)
+                        if not ok:
+                            break
+                        self._standby_stop.wait(1.0)
+                finally:
+                    self._close_virtual_output(writer)
+                if not self._standby_stop.is_set():
+                    # Re-resolve on next pass in case loopback node moved or recreated on resume
+                    current_dev = self.resolve_output_device() or current_dev
+                    self._standby_stop.wait(1.5)
         finally:
-            self._close_virtual_output(writer)
             if self._standby_thread is threading.current_thread():
                 self._standby_active = False
 
@@ -453,7 +530,7 @@ class VideoEngine:
             self._on_demand_active = _from_on_demand
             self._debounce.reset()
             self._stop.clear()
-            self.pipeline.reset()
+            self._ensure_pipeline().reset()
             self._running = True
 
             self._thread = threading.Thread(
@@ -479,6 +556,7 @@ class VideoEngine:
             self._thread = None
             self._running = False
             self._fps = 0.0
+            self._release_pipeline()
 
     def shutdown_all(self) -> None:
         """Stop watcher, live capture, and standby writer permanently."""
@@ -491,8 +569,7 @@ class VideoEngine:
             self._debounce.reset()
             self._stop_capture_only()
             self._stop_standby_writer()
-            if hasattr(self.pipeline, "close"):
-                self.pipeline.close()
+            self._release_pipeline()
 
     def stop(self, shutdown: bool = False) -> None:
         if shutdown:
@@ -534,13 +611,16 @@ class VideoEngine:
 
     def _open_virtual_output(self, out_dev: str, width: int, height: int, fps: int) -> Any:
         if HAS_PYVIRTUALCAM and HAS_NUMPY:
-            try:
-                return ("pyvirtualcam", pyvirtualcam.Camera(width=width, height=height, fps=fps, device=out_dev))
-            except Exception:
-                pass
+            _pvc = _load_pyvirtualcam()
+            if _pvc is not None:
+                try:
+                    return ("pyvirtualcam", _pvc.Camera(width=width, height=height, fps=fps, device=out_dev))
+                except Exception:
+                    pass
         if shutil.which("ffmpeg"):
             cmd = [
                 "ffmpeg",
+                "-nostdin",
                 "-hide_banner",
                 "-loglevel",
                 "error",
@@ -569,29 +649,35 @@ class VideoEngine:
                 return None
         return None
 
-    def _write_virtual_output_np(self, writer: Any, frame_rgb: Any) -> None:
+    def _write_virtual_output_np(self, writer: Any, frame_rgb: Any) -> bool:
         if writer is None:
-            return
+            return False
         kind, handle = writer
         try:
             if kind == "pyvirtualcam":
                 handle.send(frame_rgb)
-            elif kind == "ffmpeg" and handle.stdin is not None and handle.poll() is None:
+                return True
+            if kind == "ffmpeg" and handle.stdin is not None and handle.poll() is None:
                 handle.stdin.write(frame_rgb.tobytes())
+                return True
+            return False
         except Exception:
-            pass
+            return False
 
-    def _write_virtual_output_pil(self, writer: Any, frame: Image.Image) -> None:
+    def _write_virtual_output_pil(self, writer: Any, frame: Image.Image) -> bool:
         if writer is None:
-            return
+            return False
         kind, handle = writer
         try:
             if kind == "pyvirtualcam" and HAS_NUMPY:
                 handle.send(np.asarray(frame, dtype=np.uint8))
-            elif kind == "ffmpeg" and handle.stdin is not None and handle.poll() is None:
+                return True
+            if kind == "ffmpeg" and handle.stdin is not None and handle.poll() is None:
                 handle.stdin.write(frame.tobytes())
+                return True
+            return False
         except Exception:
-            pass
+            return False
 
     def _close_virtual_output(self, writer: Any) -> None:
         if writer is None:
@@ -602,10 +688,17 @@ class VideoEngine:
                 handle.close()
             elif kind == "ffmpeg":
                 if handle.stdin is not None:
-                    handle.stdin.close()
+                    try:
+                        handle.stdin.close()
+                    except Exception:
+                        pass
                 if handle.poll() is None:
                     handle.terminate()
-                    handle.wait(timeout=1.5)
+                    try:
+                        handle.wait(timeout=1.5)
+                    except subprocess.TimeoutExpired:
+                        handle.kill()
+                        handle.wait(timeout=1.0)
         except Exception:
             pass
         finally:
@@ -648,17 +741,21 @@ class VideoEngine:
         fps: int,
         out_writer: Any,
     ) -> None:
-        cap = cv2.VideoCapture(in_dev, cv2.CAP_V4L2)
+        _cv2 = _load_cv2()
+        if _cv2 is None:
+            self._last_error = "OpenCV (cv2) is unavailable"
+            return
+        cap = _cv2.VideoCapture(in_dev, _cv2.CAP_V4L2)
         if not cap.isOpened():
             self._last_error = f"OpenCV failed to open {in_dev}"
             return
         try:
             if pixfmt == "MJPG":
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            cap.set(cv2.CAP_PROP_FPS, fps)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.set(_cv2.CAP_PROP_FOURCC, _cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(_cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, height)
+            cap.set(_cv2.CAP_PROP_FPS, fps)
+            cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)
 
             frames = 0
             warmed = False
@@ -668,7 +765,7 @@ class VideoEngine:
                 if not ok or bgr is None:
                     time.sleep(0.01)
                     continue
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                rgb = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB)
                 cam_cfg = self.config.data["camera"]
                 # Always send clean un-split processed frame to virtual webcam, split only on preview
                 if cam_cfg.get("split_preview", False) and out_writer is not None:

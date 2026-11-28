@@ -133,6 +133,8 @@ def _pretty_audio_name(node_name: str) -> str:
         return "NVIDIA Broadcast (Speakers)"
     if "HiFi__Mic" in node_name:
         return "Built-in Laptop Microphone"
+    if "HiFi__Headphones" in node_name:
+        return "Wired Headphones (3.5mm)"
     if "HiFi__Speaker" in node_name:
         return "Built-in Laptop Speakers"
     if "HiFi__HDMI" in node_name:
@@ -448,17 +450,15 @@ def probe_capabilities() -> RuntimeCapabilities:
 
     onnx_providers: list[str] = []
     if pkgs["onnxruntime"]:
-        try:
-            import onnxruntime as ort  # type: ignore
-
-            if hasattr(ort, "preload_dlls"):
-                try:
-                    ort.preload_dlls()
-                except Exception:
-                    pass
-            onnx_providers = list(ort.get_available_providers())
-        except Exception:
-            pass
+        # Avoid importing onnxruntime / preloading CUDA/cuDNN (~580 MB RSS) during capability checks.
+        # Inspect package metadata on disk instead so the idle daemon stays lightweight.
+        ort_spec = importlib.util.find_spec("onnxruntime")
+        onnx_providers = ["CPUExecutionProvider"]
+        if gpu.available and ort_spec and ort_spec.submodule_search_locations:
+            ort_dir = Path(list(ort_spec.submodule_search_locations)[0])
+            capi_dir = ort_dir / "capi"
+            if any(capi_dir.glob("libonnxruntime_providers_cuda*.so*")):
+                onnx_providers.insert(0, "CUDAExecutionProvider")
 
     if df_path or pkgs["df"]:
         rec_audio = "deepfilternet"

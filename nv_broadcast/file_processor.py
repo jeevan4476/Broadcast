@@ -12,12 +12,7 @@ from typing import Any
 
 from .audio_dsp import AudioProcessor, save_pcm16_wav
 from .config import BroadcastConfig
-from .video_effects import HAS_CV2, HAS_NUMPY, VideoEffectsPipeline
-
-try:
-    import cv2  # type: ignore
-except ImportError:
-    cv2 = None  # type: ignore
+from .video_effects import HAS_CV2, HAS_NUMPY, VideoEffectsPipeline, _ensure_cv2
 
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
@@ -229,6 +224,9 @@ class FileProcessor:
 
             video_src = src
             if apply_video and HAS_CV2 and HAS_NUMPY:
+                cv2 = _ensure_cv2()
+                if cv2 is None:
+                    raise RuntimeError("OpenCV (cv2) failed to load for video processing")
                 self._update(message="Applying neural video effects...")
                 cap = cv2.VideoCapture(str(src))
                 if not cap.isOpened():

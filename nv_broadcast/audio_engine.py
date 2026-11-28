@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import select
 import shutil
 import subprocess
 import tempfile
@@ -34,9 +36,49 @@ from .pipewire import (
     generate_deepfilter_filter_chain_conf,
     generate_rnnoise_filter_chain_conf,
     generate_webrtc_echo_cancel_conf,
+    is_pw_link_active,
     is_virtual_broadcast_node,
     link_pw_nodes,
+    list_pw_links,
 )
+
+
+def _read_chunk_nonblocking(
+    fd: int,
+    buf: bytearray,
+    chunk_bytes: int,
+    timeout: float = 0.5,
+) -> tuple[bytes | None, bool]:
+    """Read up to `chunk_bytes` from `fd` with a strict `select()` timeout.
+
+    Returns `(data, False)` when a full chunk arrives, `(b"", False)` on EOF,
+    or `(None, True)` when `timeout` elapses without enough bytes arriving.
+    This guarantees audio worker loops stay responsive for hot-plug and
+    suspend/resume link healing even while the PipeWire stream is idle.
+    """
+    deadline = time.monotonic() + max(0.01, timeout)
+    while len(buf) < chunk_bytes:
+        remaining_time = deadline - time.monotonic()
+        if remaining_time <= 0:
+            return None, True
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining_time)
+        except (OSError, ValueError):
+            return b"", False
+        if not ready:
+            return None, True
+        try:
+            data = os.read(fd, chunk_bytes - len(buf))
+        except BlockingIOError:
+            return None, True
+        except OSError:
+            return b"", False
+        if not data:
+            return b"", False
+        buf.extend(data)
+    out = bytes(buf[:chunk_bytes])
+    del buf[:chunk_bytes]
+    return out, False
 
 try:
     import numpy as np  # type: ignore
@@ -322,40 +364,72 @@ class AudioEngine:
                             )
                         return ok_cap, ok_feed
 
-                    # Link BEFORE blocking on rec_proc.stdout.read() because node.autoconnect=false
-                    # means pw-cat --record will not emit frames until its input port is linked.
+                    # Link BEFORE reading because node.autoconnect=false means pw-cat --record
+                    # will not emit frames until its input port is linked.
                     deadline = time.monotonic() + 3.0
                     while not self._mic_stop.is_set() and not (cap_linked and feed_linked) and time.monotonic() < deadline:
                         cap_linked, feed_linked = _ensure_links()
                         if not (cap_linked and feed_linked):
                             self._mic_stop.wait(0.05)
 
+                    rec_fd = rec_proc.stdout.fileno()
+                    read_buf = bytearray()
+                    last_audio_ts = time.monotonic()
+                    meter_decayed = False
+
                     while not self._mic_stop.is_set():
-                        raw = rec_proc.stdout.read(chunk_bytes)
-                        if not raw:
-                            break
-                        if not (cap_linked and feed_linked):
-                            cap_linked, feed_linked = _ensure_links()
-                        processed = self.mic_processor.process_pcm16(raw, self.config.data["microphone"])
-                        try:
-                            play_proc.stdin.write(processed)
-                            play_proc.stdin.flush()
-                        except BrokenPipeError:
-                            break
-                        meter = self.mic_processor.last_meter
-                        for cb in list(self._meter_callbacks):
-                            try:
-                                cb(meter)
-                            except Exception:
-                                pass
-                        # Hot-plug follow: if set to auto and active physical mic changed, reconnect cleanly
+                        raw, timed_out = _read_chunk_nonblocking(rec_fd, read_buf, chunk_bytes, timeout=0.5)
                         now = time.monotonic()
-                        if now - last_check >= 2.0:
+                        if not timed_out:
+                            if not raw:
+                                break
+                            last_audio_ts = now
+                            meter_decayed = False
+                            if not (cap_linked and feed_linked):
+                                cap_linked, feed_linked = _ensure_links()
+                            processed = self.mic_processor.process_pcm16(raw, self.config.data["microphone"])
+                            try:
+                                play_proc.stdin.write(processed)
+                                play_proc.stdin.flush()
+                            except BrokenPipeError:
+                                break
+                            meter = self.mic_processor.last_meter
+                            for cb in list(self._meter_callbacks):
+                                try:
+                                    cb(meter)
+                                except Exception:
+                                    pass
+                        elif not meter_decayed and (now - last_audio_ts >= 1.0):
+                            meter_decayed = True
+                            idle_meter = AudioMeterReading(backend=self.mic_processor.backend_name)
+                            self.mic_processor.last_meter = idle_meter
+                            for cb in list(self._meter_callbacks):
+                                try:
+                                    cb(idle_meter)
+                                except Exception:
+                                    pass
+
+                        # Hot-plug & suspend/resume self-healing (runs even when idle/silent!)
+                        if now - last_check >= 1.5:
                             last_check = now
+                            if rec_proc.poll() is not None or play_proc.poll() is not None:
+                                break
                             if self.config.data["microphone"].get("device", "auto") == "auto":
                                 new_target = self.resolve_physical_mic()
                                 if new_target and new_target != target:
                                     break
+                            links = list_pw_links()
+                            if links or timed_out:
+                                cap_ok = is_pw_link_active(target, cap_name, links=links)
+                                feed_ok = is_pw_link_active(feeder_name, VIRTUAL_MIC_SOURCE_NAME, links=links)
+                                if not cap_ok:
+                                    cap_linked = False
+                                if not feed_ok:
+                                    feed_linked = False
+                                if not (cap_linked and feed_linked):
+                                    cap_linked, feed_linked = _ensure_links()
+                                    if not (cap_linked and feed_linked) and rec_proc.poll() is not None:
+                                        break
                 finally:
                     for proc in (rec_proc, play_proc):
                         if proc is not None and proc.poll() is None:
@@ -462,67 +536,99 @@ class AudioEngine:
                             )
                         return ok_cap, ok_out
 
-                    # Link BEFORE blocking on rec_proc.stdout.read() because node.autoconnect=false
-                    # means pw-cat --record will not emit frames until its input port is linked.
+                    # Link BEFORE reading because node.autoconnect=false means pw-cat --record
+                    # will not emit frames until its input port is linked.
                     deadline = time.monotonic() + 3.0
                     while not self._spk_stop.is_set() and not (cap_linked and out_linked) and time.monotonic() < deadline:
                         cap_linked, out_linked = _ensure_links()
                         if not (cap_linked and out_linked):
                             self._spk_stop.wait(0.05)
 
+                    rec_fd = rec_proc.stdout.fileno()
+                    read_buf = bytearray()
+                    last_audio_ts = time.monotonic()
+                    meter_decayed = False
+
                     while not self._spk_stop.is_set():
-                        raw = rec_proc.stdout.read(chunk_bytes)
-                        if not raw:
-                            break
-                        if not (cap_linked and out_linked):
-                            cap_linked, out_linked = _ensure_links()
-                        cur_spk_cfg = self.config.data["speaker"]
-                        if stereo and len(raw) >= 4:
-                            usable = (len(raw) // 4) * 4
-                            interleaved = np.frombuffer(raw[:usable], dtype=np.int16).reshape(-1, 2)
-                            l_in = interleaved[:, 0].astype(np.float32) / 32768.0
-                            r_in = interleaved[:, 1].astype(np.float32) / 32768.0
-                            effs = cur_spk_cfg.get("effects", {})
-                            any_eff = bool(
-                                effs.get("speaker_noise_removal", {}).get("enabled")
-                                or effs.get("speaker_echo_removal", {}).get("enabled")
-                            )
-                            if any_eff:
-                                l_out = self.speaker_processor._process_numpy(l_in, cur_spk_cfg)
-                                r_out = self.speaker_processor_r._process_numpy(r_in, cur_spk_cfg)
-                                stacked = np.column_stack((l_out, r_out))
-                                processed = np.clip(np.round(stacked * 32767.0), -32768, 32767).astype(np.int16).tobytes()
-                            else:
-                                in_db, pk_db = compute_rms_db(l_in)
-                                self.speaker_processor.last_meter = AudioMeterReading(
-                                    input_rms_db=round(in_db, 1),
-                                    output_rms_db=round(in_db, 1),
-                                    input_peak_db=round(pk_db, 1),
-                                    output_peak_db=round(pk_db, 1),
-                                    backend=self.speaker_processor.backend_name,
-                                )
-                                processed = raw[:usable]
-                        else:
-                            processed = self.speaker_processor.process_pcm16(raw, cur_spk_cfg)
-                        try:
-                            play_proc.stdin.write(processed)
-                            play_proc.stdin.flush()
-                        except BrokenPipeError:
-                            break
-                        meter = self.speaker_processor.last_meter
-                        for cb in list(self._speaker_meter_callbacks):
-                            try:
-                                cb(meter)
-                            except Exception:
-                                pass
-                        # Seamless 3.5mm Headphones <-> Speakers hot-plug switch!
+                        raw, timed_out = _read_chunk_nonblocking(rec_fd, read_buf, chunk_bytes, timeout=0.5)
                         now = time.monotonic()
-                        if now - last_check >= 2.0:
+                        if not timed_out:
+                            if not raw:
+                                break
+                            last_audio_ts = now
+                            meter_decayed = False
+                            if not (cap_linked and out_linked):
+                                cap_linked, out_linked = _ensure_links()
+                            cur_spk_cfg = self.config.data["speaker"]
+                            if stereo and len(raw) >= 4:
+                                usable = (len(raw) // 4) * 4
+                                interleaved = np.frombuffer(raw[:usable], dtype=np.int16).reshape(-1, 2)
+                                l_in = interleaved[:, 0].astype(np.float32) / 32768.0
+                                r_in = interleaved[:, 1].astype(np.float32) / 32768.0
+                                effs = cur_spk_cfg.get("effects", {})
+                                any_eff = bool(
+                                    effs.get("speaker_noise_removal", {}).get("enabled")
+                                    or effs.get("speaker_echo_removal", {}).get("enabled")
+                                )
+                                if any_eff:
+                                    l_out = self.speaker_processor._process_numpy(l_in, cur_spk_cfg)
+                                    r_out = self.speaker_processor_r._process_numpy(r_in, cur_spk_cfg)
+                                    stacked = np.column_stack((l_out, r_out))
+                                    processed = np.clip(np.round(stacked * 32767.0), -32768, 32767).astype(np.int16).tobytes()
+                                else:
+                                    in_db, pk_db = compute_rms_db(l_in)
+                                    self.speaker_processor.last_meter = AudioMeterReading(
+                                        input_rms_db=round(in_db, 1),
+                                        output_rms_db=round(in_db, 1),
+                                        input_peak_db=round(pk_db, 1),
+                                        output_peak_db=round(pk_db, 1),
+                                        backend=self.speaker_processor.backend_name,
+                                    )
+                                    processed = raw[:usable]
+                            else:
+                                processed = self.speaker_processor.process_pcm16(raw, cur_spk_cfg)
+                            try:
+                                play_proc.stdin.write(processed)
+                                play_proc.stdin.flush()
+                            except BrokenPipeError:
+                                break
+                            meter = self.speaker_processor.last_meter
+                            for cb in list(self._speaker_meter_callbacks):
+                                try:
+                                    cb(meter)
+                                except Exception:
+                                    pass
+                        elif not meter_decayed and (now - last_audio_ts >= 1.0):
+                            meter_decayed = True
+                            idle_meter = AudioMeterReading(backend=self.speaker_processor.backend_name)
+                            self.speaker_processor.last_meter = idle_meter
+                            for cb in list(self._speaker_meter_callbacks):
+                                try:
+                                    cb(idle_meter)
+                                except Exception:
+                                    pass
+
+                        # Seamless Headphones <-> Speakers hot-plug & suspend/resume self-healing!
+                        if now - last_check >= 1.5:
                             last_check = now
+                            if rec_proc.poll() is not None or play_proc.poll() is not None:
+                                break
                             if self.config.data["speaker"].get("device", "auto") == "auto":
                                 new_out = self.resolve_physical_speaker()
                                 if new_out and new_out != out_dev:
                                     break
+                            links = list_pw_links()
+                            if links or timed_out:
+                                cap_ok = is_pw_link_active(VIRTUAL_SPEAKER_SINK_NAME, cap_name, links=links)
+                                out_ok = is_pw_link_active(out_name, out_dev, links=links)
+                                if not cap_ok:
+                                    cap_linked = False
+                                if not out_ok:
+                                    out_linked = False
+                                if not (cap_linked and out_linked):
+                                    cap_linked, out_linked = _ensure_links()
+                                    if not (cap_linked and out_linked) and play_proc.poll() is not None:
+                                        break
                 finally:
                     for proc in (rec_proc, play_proc):
                         if proc is not None and proc.poll() is None:
@@ -551,19 +657,44 @@ class AudioEngine:
         raw_path = out_dir / "mic_raw.wav"
         proc_path = out_dir / "mic_processed.wav"
 
-        cmd = ["pw-cat", "--record", "--raw", "--format=s16", f"--rate={rate}", "--channels=1"]
-        if target:
-            cmd.append(f"--target={target}")
-        cmd.append("-")
+        test_node = "nvb_mic_test_cap"
+        if target and not is_virtual_broadcast_node(target) and shutil.which("pw-link"):
+            cmd = build_isolated_pw_cat_cmd("record", test_node, rate=rate, channels=1, latency_ms=20)
+            use_explicit_link = True
+        else:
+            cmd = ["pw-cat", "--record", "--raw", "--format=s16", f"--rate={rate}", "--channels=1"]
+            if target:
+                cmd.append(f"--target={target}")
+            cmd.append("-")
+            use_explicit_link = False
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         assert proc.stdout is not None
         target_bytes = int(rate * duration_sec) * 2
         buf = bytearray()
+        tmp_buf = bytearray()
         deadline = time.monotonic() + duration_sec + 2.5
         try:
+            if use_explicit_link:
+                link_deadline = time.monotonic() + 2.0
+                linked = False
+                while not linked and time.monotonic() < link_deadline:
+                    linked, _ = link_pw_nodes(
+                        target,
+                        test_node,
+                        src_prefix="capture_",
+                        dst_prefix="input_",
+                        allow_virtual_src=False,
+                        allow_virtual_dst=False,
+                    )
+                    if not linked:
+                        time.sleep(0.05)
+            fd = proc.stdout.fileno()
             while len(buf) < target_bytes and time.monotonic() < deadline:
-                chunk = proc.stdout.read(min(4800, target_bytes - len(buf)))
+                want = min(4800, target_bytes - len(buf))
+                chunk, timed_out = _read_chunk_nonblocking(fd, tmp_buf, want, timeout=0.25)
+                if timed_out:
+                    continue
                 if not chunk:
                     break
                 buf.extend(chunk)
@@ -574,6 +705,7 @@ class AudioEngine:
                     proc.wait(timeout=1.5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    proc.wait(timeout=1.0)
 
         raw_bytes = bytes(buf)
         dsp = AudioProcessor(sample_rate=rate, frame_size=512)
@@ -643,9 +775,10 @@ class AudioEngine:
             return False, "pw-play not found"
         if not Path(wav_path).is_file():
             return False, f"File not found: {wav_path}"
+        resolved_sink = target_sink if (target_sink and target_sink != "auto") else self.resolve_physical_speaker()
         cmd = ["pw-play"]
-        if target_sink and target_sink != "auto":
-            cmd.append(f"--target={target_sink}")
+        if resolved_sink and not is_virtual_broadcast_node(resolved_sink):
+            cmd.append(f"--target={resolved_sink}")
         cmd.append(wav_path)
         self._play_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True, f"Playing {wav_path}"
@@ -657,6 +790,7 @@ class AudioEngine:
                 self._play_proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 self._play_proc.kill()
+                self._play_proc.wait(timeout=1.0)
         self._play_proc = None
 
     def stop_all(self) -> None:
