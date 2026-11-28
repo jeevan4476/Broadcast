@@ -1,0 +1,124 @@
+{
+  "auth_header": "X-NVB-Token",
+  "auth_query_param": "token",
+  "unauthorized_response": {
+    "status": 401,
+    "keys": [
+      "error"
+    ],
+    "body": {
+      "error": "unauthorized"
+    }
+  },
+  "health": {
+    "status": 200,
+    "keys": [
+      "ok",
+      "version"
+    ],
+    "body": {
+      "ok": true,
+      "version": "2.3.0-linux.1"
+    }
+  },
+  "state": {
+    "status": 200,
+    "top_level_keys": [
+      "app",
+      "capabilities",
+      "catalog",
+      "config",
+      "devices",
+      "incompatible_groups",
+      "models",
+      "telemetry",
+      "virtual_nodes"
+    ],
+    "app_keys": [
+      "name",
+      "version"
+    ],
+    "telemetry_keys": [
+      "camera",
+      "device_sig",
+      "file_job",
+      "gpu",
+      "mic",
+      "speaker"
+    ],
+    "telemetry_mic_keys": [
+      "backend",
+      "is_default",
+      "meter",
+      "running"
+    ],
+    "telemetry_speaker_keys": [
+      "backend",
+      "is_default",
+      "meter",
+      "running"
+    ],
+    "telemetry_camera_keys": [
+      "external_consumers",
+      "face_backend",
+      "fps",
+      "idle_timeout_sec",
+      "input",
+      "last_error",
+      "on_demand",
+      "on_demand_active",
+      "output",
+      "resolution",
+      "running",
+      "segmentation_backend",
+      "standby_active"
+    ],
+    "meter_keys": [
+      "backend",
+      "gate_open",
+      "input_peak_db",
+      "input_rms_db",
+      "noise_reduction_db",
+      "output_peak_db",
+      "output_rms_db",
+      "speech_prob"
+    ]
+  },
+  "devices": {
+    "status": 200,
+    "top_level_keys": [
+      "bluetooth_cards",
+      "cameras",
+      "defaults",
+      "loopback_cameras",
+      "microphones",
+      "speakers"
+    ],
+    "defaults_keys": [
+      "default_sink",
+      "default_source",
+      "mic_is_default",
+      "speaker_is_default"
+    ]
+  },
+  "post_effect": {
+    "status": 200,
+    "keys": [
+      "applied",
+      "config",
+      "disabled_conflicts",
+      "errors",
+      "ok"
+    ],
+    "ok": true,
+    "applied": [
+      "studio_voice"
+    ],
+    "disabled_conflicts": {
+      "studio_voice": [
+        "noise_removal"
+      ]
+    },
+    "errors": []
+  }
+}

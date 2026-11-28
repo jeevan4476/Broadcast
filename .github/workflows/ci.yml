@@ -79,3 +79,57 @@ jobs:
         run: |
           bash -n nv-broadcast install-deps.sh
           shellcheck nv-broadcast install-deps.sh
+
+  rust:
+    name: Rust Build, Tests, Clippy and Smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg for offline file processor tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Run Rust workspace tests
+        run: cargo test --workspace
+
+      - name: Run Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build release Rust binaries
+        run: cargo build --release -p nvb-cli -p nvb-daemon -p nvb-camera-worker
+
+      - name: Smoke test launcher and Rust benchmark contract
+        working-directory: .
+        run: |
+          ./nv-broadcast --version
+          ./nv-broadcast --json status | grep -q '"engine": "rust"'
+          ./nv-broadcast bench capabilities | grep -q '"file_processor": true'
+          python3 bench/run_suite.py --targets baseline,python,rust --suites api_cli,reliability --profile quick --rust-release
+
+      - name: Upload Linux x86_64 Rust binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvb-linux-x86_64-${{ github.sha }}
+          path: |
+            rust/target/release/nvb-cli
+            rust/target/release/nvb-daemon
+            rust/target/release/nvb-camera-worker
+          retention-days: 14

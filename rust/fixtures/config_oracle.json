@@ -1,0 +1,999 @@
+{
+  "schema_version": 2,
+  "app": {
+    "name": "NVIDIA Broadcast (Linux)",
+    "version": "2.3.0-linux.1"
+  },
+  "enums": {
+    "audio_backends": [
+      "auto",
+      "pyrnnoise",
+      "deepfilternet",
+      "rnnoise_ladspa",
+      "webrtc_aec",
+      "ffmpeg_afftdn",
+      "dsp"
+    ],
+    "segmentation_backends": [
+      "auto",
+      "rvm_cuda",
+      "onnx_cuda",
+      "mediapipe",
+      "rvm_cpu",
+      "onnx_cpu",
+      "fast_portrait"
+    ],
+    "studio_voice_profiles": [
+      "default",
+      "bright",
+      "full",
+      "warm"
+    ],
+    "blur_modes": [
+      "performance",
+      "quality"
+    ],
+    "bg_replace_presets": [
+      "studio_dark",
+      "office_blur",
+      "neon_green",
+      "soft_daylight"
+    ]
+  },
+  "incompatible_groups": [
+    [
+      "background_blur",
+      "background_replace",
+      "background_remove"
+    ],
+    [
+      "studio_voice",
+      "noise_removal"
+    ],
+    [
+      "studio_voice",
+      "room_echo_removal"
+    ]
+  ],
+  "effect_catalog": {
+    "noise_removal": {
+      "section": "microphone",
+      "label": "Noise Removal",
+      "gpu_load": "Low",
+      "description": "Uses neural AI (RNNoise) to eliminate fan, keyboard, and ambient background noise.",
+      "params": {
+        "strength": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.85
+        }
+      }
+    },
+    "room_echo_removal": {
+      "section": "microphone",
+      "label": "Room Echo Removal",
+      "gpu_load": "Low",
+      "description": "Attenuates room reverberation and hollow wall reflections.",
+      "params": {
+        "strength": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.5
+        }
+      }
+    },
+    "studio_voice": {
+      "section": "microphone",
+      "label": "Studio Voice",
+      "gpu_load": "Medium",
+      "description": "Neural cleanup paired with broadcast vocal EQ, warmth, and dynamic leveling.",
+      "params": {
+        "micProfile": {
+          "type": "enum",
+          "enum": [
+            "default",
+            "bright",
+            "full",
+            "warm"
+          ],
+          "default": "default"
+        }
+      }
+    },
+    "speaker_noise_removal": {
+      "section": "speaker",
+      "label": "Noise Removal",
+      "gpu_load": "Low",
+      "description": "Cleans background noise from incoming voice calls and meeting audio.",
+      "params": {
+        "strength": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.75
+        }
+      }
+    },
+    "speaker_echo_removal": {
+      "section": "speaker",
+      "label": "Room Echo Removal",
+      "gpu_load": "Low",
+      "description": "Reduces room echo on incoming call audio.",
+      "params": {
+        "strength": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.5
+        }
+      }
+    },
+    "background_blur": {
+      "section": "camera",
+      "label": "Background Blur",
+      "gpu_load": "Medium",
+      "description": "Uses neural portrait matting to smoothly blur your background.",
+      "params": {
+        "strength": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.7
+        },
+        "mode": {
+          "type": "enum",
+          "enum": [
+            "performance",
+            "quality"
+          ],
+          "default": "quality"
+        }
+      }
+    },
+    "background_replace": {
+      "section": "camera",
+      "label": "Background Replacement",
+      "gpu_load": "Medium",
+      "description": "Replaces your background with a custom image or studio backdrop.",
+      "params": {
+        "imagePath": {
+          "type": "path",
+          "default": ""
+        },
+        "preset": {
+          "type": "enum",
+          "enum": [
+            "studio_dark",
+            "office_blur",
+            "neon_green",
+            "soft_daylight"
+          ],
+          "default": "studio_dark"
+        }
+      }
+    },
+    "background_remove": {
+      "section": "camera",
+      "label": "Background Removal",
+      "gpu_load": "Medium",
+      "description": "Replaces your background with chroma green (#00FF00) for OBS compositing.",
+      "params": {
+        "chromaColor": {
+          "type": "string",
+          "default": "#00ff00"
+        }
+      }
+    },
+    "auto_frame": {
+      "section": "camera",
+      "label": "Auto Frame",
+      "gpu_load": "Low",
+      "description": "Tracks your face and smoothly crops and zooms to keep you centered.",
+      "params": {
+        "zoom": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.35
+        }
+      }
+    },
+    "eye_contact": {
+      "section": "camera",
+      "label": "Eye Contact",
+      "gpu_load": "Medium",
+      "description": "Redirects your gaze toward the camera using real-time iris tracking.",
+      "params": {
+        "strength": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.7
+        },
+        "lookAway": {
+          "type": "bool",
+          "default": true
+        }
+      }
+    },
+    "video_noise_removal": {
+      "section": "camera",
+      "label": "Video Noise Removal",
+      "gpu_load": "Low",
+      "description": "Strips low-light webcam grain using motion-aware temporal and bilateral denoising.",
+      "params": {
+        "strength": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.6
+        }
+      }
+    },
+    "virtual_key_light": {
+      "section": "camera",
+      "label": "Virtual Key Light",
+      "gpu_load": "Medium",
+      "description": "Relights your face with adjustable cool-to-warm studio key lighting.",
+      "params": {
+        "warmth": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.5
+        },
+        "intensity": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.55
+        }
+      }
+    },
+    "vignette": {
+      "section": "camera",
+      "label": "Vignette",
+      "gpu_load": "Low",
+      "description": "Applies a soft studio edge darkening that can follow your face.",
+      "params": {
+        "strength": {
+          "type": "float",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.4
+        },
+        "faceTracking": {
+          "type": "bool",
+          "default": true
+        }
+      }
+    }
+  },
+  "default_config": {
+    "version": 2,
+    "audio_backend": "auto",
+    "segmentation_backend": "auto",
+    "ui": {
+      "show_gpu_indicator": true,
+      "start_minimized": false
+    },
+    "microphone": {
+      "device": "auto",
+      "virtual_name": "NVIDIA Broadcast (Microphone)",
+      "sample_rate": 48000,
+      "highpass_enabled": true,
+      "highpass_hz": 85,
+      "noise_gate_enabled": true,
+      "noise_gate_db": -46.0,
+      "auto_gain_enabled": true,
+      "auto_gain_target_db": -16.0,
+      "effects": {
+        "noise_removal": {
+          "enabled": true,
+          "strength": 0.85
+        },
+        "room_echo_removal": {
+          "enabled": false,
+          "strength": 0.5
+        },
+        "studio_voice": {
+          "enabled": false,
+          "micProfile": "default"
+        }
+      }
+    },
+    "speaker": {
+      "device": "auto",
+      "virtual_name": "NVIDIA Broadcast (Speakers)",
+      "sample_rate": 48000,
+      "effects": {
+        "speaker_noise_removal": {
+          "enabled": false,
+          "strength": 0.75
+        },
+        "speaker_echo_removal": {
+          "enabled": false,
+          "strength": 0.5
+        }
+      }
+    },
+    "camera": {
+      "device": "auto",
+      "output_device": "auto",
+      "virtual_name": "NVIDIA Broadcast Camera",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "prefer_mjpg": true,
+      "mirror": false,
+      "split_preview": false,
+      "split_position": 0.5,
+      "on_demand": true,
+      "idle_timeout_sec": 3.0,
+      "v4l2_controls": {},
+      "effects": {
+        "background_blur": {
+          "enabled": false,
+          "strength": 0.7,
+          "mode": "quality"
+        },
+        "background_replace": {
+          "enabled": false,
+          "imagePath": "",
+          "preset": "studio_dark"
+        },
+        "background_remove": {
+          "enabled": false,
+          "chromaColor": "#00ff00"
+        },
+        "auto_frame": {
+          "enabled": false,
+          "zoom": 0.35
+        },
+        "eye_contact": {
+          "enabled": false,
+          "strength": 0.7,
+          "lookAway": true
+        },
+        "video_noise_removal": {
+          "enabled": false,
+          "strength": 0.6
+        },
+        "virtual_key_light": {
+          "enabled": false,
+          "warmth": 0.5,
+          "intensity": 0.55
+        },
+        "vignette": {
+          "enabled": false,
+          "strength": 0.4,
+          "faceTracking": true
+        }
+      }
+    }
+  },
+  "loaded_default_config": {
+    "version": 2,
+    "audio_backend": "auto",
+    "segmentation_backend": "auto",
+    "ui": {
+      "show_gpu_indicator": true,
+      "start_minimized": false
+    },
+    "microphone": {
+      "device": "auto",
+      "virtual_name": "NVIDIA Broadcast (Microphone)",
+      "sample_rate": 48000,
+      "highpass_enabled": true,
+      "highpass_hz": 85,
+      "noise_gate_enabled": true,
+      "noise_gate_db": -46.0,
+      "auto_gain_enabled": true,
+      "auto_gain_target_db": -16.0,
+      "effects": {
+        "noise_removal": {
+          "enabled": true,
+          "strength": 0.85
+        },
+        "room_echo_removal": {
+          "enabled": false,
+          "strength": 0.5
+        },
+        "studio_voice": {
+          "enabled": false,
+          "micProfile": "default"
+        }
+      }
+    },
+    "speaker": {
+      "device": "auto",
+      "virtual_name": "NVIDIA Broadcast (Speakers)",
+      "sample_rate": 48000,
+      "effects": {
+        "speaker_noise_removal": {
+          "enabled": false,
+          "strength": 0.75
+        },
+        "speaker_echo_removal": {
+          "enabled": false,
+          "strength": 0.5
+        }
+      }
+    },
+    "camera": {
+      "device": "auto",
+      "output_device": "auto",
+      "virtual_name": "NVIDIA Broadcast Camera",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "prefer_mjpg": true,
+      "mirror": false,
+      "split_preview": false,
+      "split_position": 0.5,
+      "on_demand": true,
+      "idle_timeout_sec": 3.0,
+      "v4l2_controls": {},
+      "effects": {
+        "background_blur": {
+          "enabled": false,
+          "strength": 0.7,
+          "mode": "quality"
+        },
+        "background_replace": {
+          "enabled": false,
+          "imagePath": "",
+          "preset": "studio_dark"
+        },
+        "background_remove": {
+          "enabled": false,
+          "chromaColor": "#00ff00"
+        },
+        "auto_frame": {
+          "enabled": false,
+          "zoom": 0.35
+        },
+        "eye_contact": {
+          "enabled": false,
+          "strength": 0.7,
+          "lookAway": true
+        },
+        "video_noise_removal": {
+          "enabled": false,
+          "strength": 0.6
+        },
+        "virtual_key_light": {
+          "enabled": false,
+          "warmth": 0.5,
+          "intensity": 0.55
+        },
+        "vignette": {
+          "enabled": false,
+          "strength": 0.4,
+          "faceTracking": true
+        }
+      }
+    }
+  },
+  "sanitization_case": {
+    "input": {
+      "audio_backend": "not_a_real_backend",
+      "segmentation_backend": "invalid_seg",
+      "microphone": {
+        "highpass_hz": 9999,
+        "noise_gate_db": -120.5,
+        "auto_gain_target_db": 12.0,
+        "effects": {
+          "noise_removal": {
+            "enabled": true,
+            "strength": 1.8
+          },
+          "room_echo_removal": {
+            "enabled": false,
+            "strength": -0.4
+          },
+          "studio_voice": {
+            "enabled": false,
+            "micProfile": "alien"
+          }
+        }
+      },
+      "camera": {
+        "split_preview": 1,
+        "split_position": 0.99,
+        "on_demand": null,
+        "idle_timeout_sec": 0.05,
+        "effects": {
+          "background_blur": {
+            "enabled": true,
+            "strength": -5.0,
+            "mode": "ultra"
+          },
+          "background_replace": {
+            "enabled": false,
+            "preset": "mars"
+          },
+          "auto_frame": {
+            "enabled": true,
+            "zoom": 2.5
+          }
+        }
+      }
+    },
+    "expected": {
+      "version": 2,
+      "audio_backend": "auto",
+      "segmentation_backend": "auto",
+      "ui": {
+        "show_gpu_indicator": true,
+        "start_minimized": false
+      },
+      "microphone": {
+        "device": "auto",
+        "virtual_name": "NVIDIA Broadcast (Microphone)",
+        "sample_rate": 48000,
+        "highpass_enabled": true,
+        "highpass_hz": 300,
+        "noise_gate_enabled": true,
+        "noise_gate_db": -80.0,
+        "auto_gain_enabled": true,
+        "auto_gain_target_db": -3.0,
+        "effects": {
+          "noise_removal": {
+            "enabled": true,
+            "strength": 1.0
+          },
+          "room_echo_removal": {
+            "enabled": false,
+            "strength": 0.0
+          },
+          "studio_voice": {
+            "enabled": false,
+            "micProfile": "default"
+          }
+        }
+      },
+      "speaker": {
+        "device": "auto",
+        "virtual_name": "NVIDIA Broadcast (Speakers)",
+        "sample_rate": 48000,
+        "effects": {
+          "speaker_noise_removal": {
+            "enabled": false,
+            "strength": 0.75
+          },
+          "speaker_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          }
+        }
+      },
+      "camera": {
+        "device": "auto",
+        "output_device": "auto",
+        "virtual_name": "NVIDIA Broadcast Camera",
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "prefer_mjpg": true,
+        "mirror": false,
+        "split_preview": true,
+        "split_position": 0.95,
+        "on_demand": true,
+        "idle_timeout_sec": 0.5,
+        "v4l2_controls": {},
+        "effects": {
+          "background_blur": {
+            "enabled": true,
+            "strength": 0.0,
+            "mode": "quality"
+          },
+          "background_replace": {
+            "enabled": false,
+            "imagePath": "",
+            "preset": "studio_dark"
+          },
+          "background_remove": {
+            "enabled": false,
+            "chromaColor": "#00ff00"
+          },
+          "auto_frame": {
+            "enabled": true,
+            "zoom": 1.0
+          },
+          "eye_contact": {
+            "enabled": false,
+            "strength": 0.7,
+            "lookAway": true
+          },
+          "video_noise_removal": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "virtual_key_light": {
+            "enabled": false,
+            "warmth": 0.5,
+            "intensity": 0.55
+          },
+          "vignette": {
+            "enabled": false,
+            "strength": 0.4,
+            "faceTracking": true
+          }
+        }
+      }
+    }
+  },
+  "conflict_cases": [
+    {
+      "name": "studio_voice_disables_mic_noise_and_echo",
+      "setup": [
+        {
+          "effect_id": "noise_removal",
+          "enabled": true
+        },
+        {
+          "effect_id": "room_echo_removal",
+          "enabled": true
+        }
+      ],
+      "action": {
+        "effect_id": "studio_voice",
+        "enabled": true,
+        "params": {
+          "micProfile": "warm"
+        }
+      },
+      "result": {
+        "applied": [
+          "studio_voice"
+        ],
+        "disabled_conflicts": {
+          "studio_voice": [
+            "noise_removal",
+            "room_echo_removal"
+          ]
+        },
+        "errors": []
+      },
+      "final_broadcast_state": {
+        "microphone": {
+          "noise_removal": {
+            "enabled": false,
+            "strength": 0.85
+          },
+          "room_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          },
+          "studio_voice": {
+            "enabled": true,
+            "micProfile": "warm"
+          }
+        },
+        "speaker": {
+          "speaker_noise_removal": {
+            "enabled": false,
+            "strength": 0.75
+          },
+          "speaker_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          }
+        },
+        "camera": {
+          "background_blur": {
+            "enabled": false,
+            "strength": 0.7,
+            "mode": "quality"
+          },
+          "background_replace": {
+            "enabled": false,
+            "imagePath": "",
+            "preset": "studio_dark"
+          },
+          "background_remove": {
+            "enabled": false,
+            "chromaColor": "#00ff00"
+          },
+          "auto_frame": {
+            "enabled": false,
+            "zoom": 0.35
+          },
+          "eye_contact": {
+            "enabled": false,
+            "strength": 0.7,
+            "lookAway": true
+          },
+          "video_noise_removal": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "virtual_key_light": {
+            "enabled": false,
+            "warmth": 0.5,
+            "intensity": 0.55
+          },
+          "vignette": {
+            "enabled": false,
+            "strength": 0.4,
+            "faceTracking": true
+          }
+        }
+      }
+    },
+    {
+      "name": "background_remove_disables_background_blur",
+      "setup": [
+        {
+          "effect_id": "background_blur",
+          "enabled": true,
+          "params": {
+            "strength": 0.85,
+            "mode": "performance"
+          }
+        }
+      ],
+      "action": {
+        "effect_id": "background_remove",
+        "enabled": true,
+        "params": {
+          "chromaColor": "#00ff00"
+        }
+      },
+      "result": {
+        "applied": [
+          "background_remove"
+        ],
+        "disabled_conflicts": {
+          "background_remove": [
+            "background_blur"
+          ]
+        },
+        "errors": []
+      },
+      "final_broadcast_state": {
+        "microphone": {
+          "noise_removal": {
+            "enabled": true,
+            "strength": 0.85
+          },
+          "room_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          },
+          "studio_voice": {
+            "enabled": false,
+            "micProfile": "default"
+          }
+        },
+        "speaker": {
+          "speaker_noise_removal": {
+            "enabled": false,
+            "strength": 0.75
+          },
+          "speaker_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          }
+        },
+        "camera": {
+          "background_blur": {
+            "enabled": false,
+            "strength": 0.85,
+            "mode": "performance"
+          },
+          "background_replace": {
+            "enabled": false,
+            "imagePath": "",
+            "preset": "studio_dark"
+          },
+          "background_remove": {
+            "enabled": true,
+            "chromaColor": "#00ff00"
+          },
+          "auto_frame": {
+            "enabled": false,
+            "zoom": 0.35
+          },
+          "eye_contact": {
+            "enabled": false,
+            "strength": 0.7,
+            "lookAway": true
+          },
+          "video_noise_removal": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "virtual_key_light": {
+            "enabled": false,
+            "warmth": 0.5,
+            "intensity": 0.55
+          },
+          "vignette": {
+            "enabled": false,
+            "strength": 0.4,
+            "faceTracking": true
+          }
+        }
+      }
+    },
+    {
+      "name": "noise_removal_disables_studio_voice",
+      "setup": [
+        {
+          "effect_id": "studio_voice",
+          "enabled": true,
+          "params": {
+            "micProfile": "bright"
+          }
+        }
+      ],
+      "action": {
+        "effect_id": "noise_removal",
+        "enabled": true,
+        "params": {
+          "strength": 0.9
+        }
+      },
+      "result": {
+        "applied": [
+          "noise_removal"
+        ],
+        "disabled_conflicts": {
+          "noise_removal": [
+            "studio_voice"
+          ]
+        },
+        "errors": []
+      },
+      "final_broadcast_state": {
+        "microphone": {
+          "noise_removal": {
+            "enabled": true,
+            "strength": 0.9
+          },
+          "room_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          },
+          "studio_voice": {
+            "enabled": false,
+            "micProfile": "bright"
+          }
+        },
+        "speaker": {
+          "speaker_noise_removal": {
+            "enabled": false,
+            "strength": 0.75
+          },
+          "speaker_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          }
+        },
+        "camera": {
+          "background_blur": {
+            "enabled": false,
+            "strength": 0.7,
+            "mode": "quality"
+          },
+          "background_replace": {
+            "enabled": false,
+            "imagePath": "",
+            "preset": "studio_dark"
+          },
+          "background_remove": {
+            "enabled": false,
+            "chromaColor": "#00ff00"
+          },
+          "auto_frame": {
+            "enabled": false,
+            "zoom": 0.35
+          },
+          "eye_contact": {
+            "enabled": false,
+            "strength": 0.7,
+            "lookAway": true
+          },
+          "video_noise_removal": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "virtual_key_light": {
+            "enabled": false,
+            "warmth": 0.5,
+            "intensity": 0.55
+          },
+          "vignette": {
+            "enabled": false,
+            "strength": 0.4,
+            "faceTracking": true
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown_effect_returns_error",
+      "setup": [],
+      "action": {
+        "effect_id": "does_not_exist",
+        "enabled": true
+      },
+      "result": {
+        "applied": [],
+        "disabled_conflicts": {},
+        "errors": [
+          "Unknown effectId: does_not_exist"
+        ]
+      },
+      "final_broadcast_state": {
+        "microphone": {
+          "noise_removal": {
+            "enabled": true,
+            "strength": 0.85
+          },
+          "room_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          },
+          "studio_voice": {
+            "enabled": false,
+            "micProfile": "default"
+          }
+        },
+        "speaker": {
+          "speaker_noise_removal": {
+            "enabled": false,
+            "strength": 0.75
+          },
+          "speaker_echo_removal": {
+            "enabled": false,
+            "strength": 0.5
+          }
+        },
+        "camera": {
+          "background_blur": {
+            "enabled": false,
+            "strength": 0.7,
+            "mode": "quality"
+          },
+          "background_replace": {
+            "enabled": false,
+            "imagePath": "",
+            "preset": "studio_dark"
+          },
+          "background_remove": {
+            "enabled": false,
+            "chromaColor": "#00ff00"
+          },
+          "auto_frame": {
+            "enabled": false,
+            "zoom": 0.35
+          },
+          "eye_contact": {
+            "enabled": false,
+            "strength": 0.7,
+            "lookAway": true
+          },
+          "video_noise_removal": {
+            "enabled": false,
+            "strength": 0.6
+          },
+          "virtual_key_light": {
+            "enabled": false,
+            "warmth": 0.5,
+            "intensity": 0.55
+          },
+          "vignette": {
+            "enabled": false,
+            "strength": 0.4,
+            "faceTracking": true
+          }
+        }
+      }
+    }
+  ]
+}

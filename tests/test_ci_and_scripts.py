@@ -11,6 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 UI_PACKAGE_JSON = REPO_ROOT / "ui" / "package.json"
 UI_NPMRC = REPO_ROOT / "ui" / ".npmrc"
 SHELL_SCRIPTS = [
@@ -60,6 +61,23 @@ class TestCIWorkflow(unittest.TestCase):
         self.assertIsNone(
             re.search(r"\b(?:npm|npx)\b", self.workflow_text),
             "CI workflow must not invoke npm or npx",
+        )
+
+    def test_rust_ci_and_release_cd_workflows(self) -> None:
+        self.assertIn("cargo test --workspace", self.workflow_text)
+        self.assertIn("cargo clippy --workspace --all-targets -- -D warnings", self.workflow_text)
+        self.assertIn("cargo build --release -p nvb-cli -p nvb-daemon -p nvb-camera-worker", self.workflow_text)
+        self.assertIn("actions/upload-artifact@v4", self.workflow_text)
+
+        self.assertTrue(RELEASE_WORKFLOW.is_file(), f"Missing CD workflow: {RELEASE_WORKFLOW}")
+        rel_text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn('tags:\n      - "v*"', rel_text)
+        self.assertIn("workflow_dispatch:", rel_text)
+        self.assertIn("softprops/action-gh-release@v2", rel_text)
+        self.assertIn("SHA256SUMS.txt", rel_text)
+        self.assertIsNone(
+            re.search(r"\b(?:npm|npx)\b", rel_text),
+            "Release workflow must not invoke npm or npx",
         )
 
 
